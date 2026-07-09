@@ -1,0 +1,99 @@
+// Synapse AI — connector storage
+//
+// Single SQLite file at ./synapse.db for dev. Swap the datasource provider +
+// url to "postgresql" / process.env.DATABASE_URL when shipping to hosted infra
+// — schema is portable, no rewrite needed.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// One row per (SF org × provider). The org_id comes from the JWT the Apex
+// callouts mint, so the server never has to trust the caller's claim.
+model Connector {
+  id                  String    @id @default(uuid())
+  orgId               String    // 15/18 char SF org Id
+  providerKey         String    // 'salesforce_mcp' for now; gdrive/slack/... later
+  displayName         String
+  status              String    @default("Pending") // Pending / Connected / Disconnected / Error
+  authType            String    @default("OAuth2")  // OAuth2 / ApiKey / ClientCredentials
+
+  // OAuth credentials (encrypted at the disk level when this moves to managed Postgres;
+  // for dev SQLite we rely on file-system perms).
+  accessToken         String?
+  refreshToken        String?
+  tokenExpiresAt      DateTime?
+  scopes              String?
+  instanceUrl         String?   // SF-specific — token response includes it
+
+  // Display / identity bits
+  accountEmail        String?
+  externalAccountId   String?   // SF user id parsed out of the `id` URL
+  apiKey              String?   // For ApiKey-auth providers (not used by SF MCP)
+
+  // Bookkeeping
+  configuredBy        String?   // SF user id
+  lastConnectedAt     DateTime?
+  lastErrorMessage    String?
+  configJson          String?   // free-form provider extras
+
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+
+  @@unique([orgId, providerKey])
+  @@index([orgId])
+}
+
+// Short-lived rows that anchor an OAuth round-trip. State (a UUID) is the
+// only thing the provider sends back to us in the redirect; we look it up
+// here to find the org + return URL.
+model PendingOAuth {
+  state             String    @id   // UUID we put in the authorize URL
+  orgId             String
+  providerKey       String
+  displayName       String
+  returnUrl         String              // SF Lightning page to send the user back to
+  connectorId       String?             // existing connector if this is a re-auth
+  createdAt         DateTime  @default(now())
+
+  @@index([orgId])
+}
+
+// One row per SF org that has completed the Synapse Setup OAuth dance.
+// `sessionKey` is what every subsequent Apex→server callout uses as Bearer.
+// The SF tokens give the server identity-of-the-org guarantees and can be
+// reused for back-channel callouts into the customer's SF org.
+model OrgInstall {
+  orgId             String    @id   // SF org Id (15/18 char)
+  sessionKey        String    @unique
+  sfAccessToken     String
+  sfRefreshToken    String?
+  sfInstanceUrl     String
+  sfUserId          String?           // user who completed setup
+  sfUserEmail       String?
+  tokenExpiresAt    DateTime?
+  scopes            String?
+  configuredAt      DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+}
+
+// One row per app-level setup attempt. Created when Apex calls
+// /api/setup/authorize-url; deleted by /api/setup/callback after the
+// sessionKey is promoted into OrgInstall. `sessionKey` is generated
+// upfront and returned to Apex immediately — but the server only
+// recognises it as valid AFTER it lives on an OrgInstall row.
+model PendingSetup {
+  state             String    @id   // UUID we put in the authorize URL
+  orgId             String              // SF org Id of the admin who started setup
+  userId            String
+  returnUrl         String              // Lightning page to send the user back to
+  sessionKey        String              // pre-minted; promoted to OrgInstall on success
+  createdAt         DateTime  @default(now())
+
+  @@index([orgId])
+}
