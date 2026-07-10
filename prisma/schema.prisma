@@ -1,15 +1,15 @@
 // Synapse AI — connector storage
 //
-// Single SQLite file at ./synapse.db for dev. Swap the datasource provider +
-// url to "postgresql" / process.env.DATABASE_URL when shipping to hosted infra
-// — schema is portable, no rewrite needed.
+// PostgreSQL (Render free tier in prod; local dev can point at the same
+// instance via the External connection string). SQLite era ended — deploys
+// were wiping the token store on every push.
 
 generator client {
   provider = "prisma-client-js"
 }
 
 datasource db {
-  provider = "sqlite"
+  provider = "postgresql"
   url      = env("DATABASE_URL")
 }
 
