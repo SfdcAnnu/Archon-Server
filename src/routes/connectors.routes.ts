@@ -24,6 +24,12 @@ import {
   exchangeGoogleCode,
   fetchGoogleUserInfo,
 } from '../oauth/google';
+import {
+  microsoftConfigured,
+  buildMicrosoftAuthorizeUrl,
+  exchangeMicrosoftCode,
+  fetchMicrosoftUserInfo,
+} from '../oauth/microsoft';
 import type { OrgInstall } from '@prisma/client';
 
 export const connectorsRouter = Router();
@@ -47,6 +53,23 @@ interface OAuthProvider {
 }
 
 const OAUTH_PROVIDERS: Record<string, OAuthProvider> = {
+  outlook: {
+    configured: microsoftConfigured,
+    notConfiguredHint: 'Outlook OAuth is not configured — set MS_CLIENT_ID and MS_CLIENT_SECRET in server/.env and register the callback URL on the Azure app.',
+    authorizeUrl: buildMicrosoftAuthorizeUrl,
+    finish: async (code) => {
+      const tok = await exchangeMicrosoftCode(code);
+      const who = await fetchMicrosoftUserInfo(tok.access_token);
+      return {
+        accessToken:       tok.access_token,
+        refreshToken:      tok.refresh_token ?? null,
+        tokenExpiresAt:    tok.expires_in ? new Date(Date.now() + tok.expires_in * 1000) : null,
+        scopes:            tok.scope ?? null,
+        accountEmail:      who.email ?? null,
+        externalAccountId: who.id ?? null,
+      };
+    },
+  },
   gmail: {
     configured: googleConfigured,
     notConfiguredHint: 'Gmail OAuth is not configured — set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET in server/.env and register the callback URL on the Google OAuth client.',

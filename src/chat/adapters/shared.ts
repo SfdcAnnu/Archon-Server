@@ -12,6 +12,7 @@ import { config } from '../../config';
 import { logger } from '../../logger';
 import { ConnectorsRepo } from '../../db/connectors.repo';
 import { refreshGoogleToken } from '../../oauth/google';
+import { refreshMicrosoftToken } from '../../oauth/microsoft';
 import type { AgentDefinition, AgentNode } from '../../types';
 import type { ChatTurnRequest } from './types';
 import type { Connector } from '@prisma/client';
@@ -30,6 +31,17 @@ async function freshConnectorToken(row: Connector): Promise<string | null> {
       const tok = await refreshGoogleToken(row.refreshToken);
       const updated = await ConnectorsRepo.updateTokens(row.id, {
         accessToken:    tok.access_token,
+        tokenExpiresAt: tok.expires_in ? new Date(Date.now() + tok.expires_in * 1000) : null,
+      });
+      logger.info({ connectorId: row.id, provider: row.providerKey }, 'connector_token_refreshed');
+      return updated.accessToken;
+    }
+    if (row.providerKey === 'outlook') {
+      // Microsoft ROTATES refresh tokens — persist the new one every time.
+      const tok = await refreshMicrosoftToken(row.refreshToken);
+      const updated = await ConnectorsRepo.updateTokens(row.id, {
+        accessToken:    tok.access_token,
+        refreshToken:   tok.refresh_token ?? undefined,
         tokenExpiresAt: tok.expires_in ? new Date(Date.now() + tok.expires_in * 1000) : null,
       });
       logger.info({ connectorId: row.id, provider: row.providerKey }, 'connector_token_refreshed');

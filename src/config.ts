@@ -45,6 +45,15 @@ export const config = {
     clientSecret: optional('GOOGLE_CLIENT_SECRET'),
   },
 
+  // Microsoft (Entra ID) app — powers the Outlook connector's Connect flow.
+  // Same Azure app as the Outlook MCP server; register
+  // <SERVER_PUBLIC_URL>/api/connectors/oauth/callback as a redirect URI.
+  microsoft: {
+    clientId:     optional('MS_CLIENT_ID'),
+    clientSecret: optional('MS_CLIENT_SECRET'),
+    tenant:       optional('MS_TENANT', 'common'),
+  },
+
   salesforce: {
     loginUrl: optional('SF_LOGIN_URL', 'https://login.salesforce.com'),
     clientId: optional('SF_CLIENT_ID'),
