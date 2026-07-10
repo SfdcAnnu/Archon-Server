@@ -17,7 +17,7 @@ import { sessionAuth } from '../auth/session';
 import { InstallsRepo } from '../db/installs.repo';
 import { ConnectorsRepo, PendingOAuthRepo } from '../db/connectors.repo';
 import { mcpListTools } from '../mcp/clients/streamable-http-client';
-import { refreshAccessToken } from '../oauth/salesforce';
+import { refreshAccessToken, buildAuthorizeUrl, exchangeCode, fetchUserInfo, parseUserIdFromIdUrl, brokerRedirectUri as sfBrokerRedirectUri } from '../oauth/salesforce';
 import {
   googleConfigured,
   buildGoogleAuthorizeUrl,
@@ -47,12 +47,34 @@ interface OAuthProvider {
     refreshToken?: string | null;
     tokenExpiresAt?: Date | null;
     scopes?: string | null;
+    instanceUrl?: string | null;
     accountEmail?: string | null;
     externalAccountId?: string | null;
   }>;
 }
 
 const OAUTH_PROVIDERS: Record<string, OAuthProvider> = {
+  // Per-user Salesforce connection — chat tool calls run with THIS user's
+  // record access instead of the org-level Archon Setup tokens. Runtime
+  // prefers the chatting user's personal connection when one exists.
+  salesforce_mcp: {
+    configured: () => !!(config.salesforce.mcpClientId && config.salesforce.mcpClientSecret),
+    notConfiguredHint: 'Salesforce OAuth is not configured — set SF_MCP_CLIENT_ID and SF_MCP_CLIENT_SECRET in server/.env.',
+    authorizeUrl: (state) => buildAuthorizeUrl(state, ['refresh_token', 'api', 'chatter_api', 'id'], sfBrokerRedirectUri()),
+    finish: async (code) => {
+      const tok = await exchangeCode(code, sfBrokerRedirectUri());
+      const who = await fetchUserInfo(tok.instance_url, tok.access_token);
+      return {
+        accessToken:       tok.access_token,
+        refreshToken:      tok.refresh_token ?? null,
+        tokenExpiresAt:    tok.expires_in ? new Date(Date.now() + Number(tok.expires_in) * 1000) : null,
+        scopes:            tok.scope ?? null,
+        instanceUrl:       tok.instance_url ?? null,
+        accountEmail:      who.email ?? null,
+        externalAccountId: who.user_id ?? parseUserIdFromIdUrl(tok.id) ?? null,
+      };
+    },
+  },
   outlook: {
     configured: microsoftConfigured,
     notConfiguredHint: 'Outlook OAuth is not configured — set MS_CLIENT_ID and MS_CLIENT_SECRET in server/.env and register the callback URL on the Azure app.',
@@ -98,6 +120,8 @@ connectorsRouter.post('/api/connectors/oauth/start', sessionAuth, async (req, re
   const providerKey = String(req.body?.providerKey ?? '');
   const displayName = String(req.body?.displayName ?? providerKey);
   const returnUrl   = String(req.body?.returnUrl ?? '');
+  // The SF user starting the flow — connections are PER USER.
+  const userId      = String(req.body?.userId ?? '') || null;
 
   const provider = OAUTH_PROVIDERS[providerKey];
   if (!provider) {
@@ -116,7 +140,7 @@ connectorsRouter.post('/api/connectors/oauth/start', sessionAuth, async (req, re
 
   try {
     const connector = await ConnectorsRepo.upsertPending({
-      orgId, providerKey, displayName, authType: 'OAuth2',
+      orgId, providerKey, displayName, authType: 'OAuth2', configuredBy: userId,
     });
     const state = crypto.randomUUID();
     await PendingOAuthRepo.create({ state, orgId, providerKey, displayName, returnUrl, connectorId: connector.id });

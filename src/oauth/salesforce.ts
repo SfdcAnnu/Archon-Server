@@ -23,14 +23,23 @@ export function redirectUri(): string {
   return `${config.serverPublicUrl.replace(/\/+$/, '')}/api/setup/callback`;
 }
 
-export function buildAuthorizeUrl(state: string, scopes: string[] = ['refresh_token', 'api', 'chatter_api', 'id']): string {
+/** Redirect for PER-USER Salesforce connections via the connector broker. */
+export function brokerRedirectUri(): string {
+  return `${config.serverPublicUrl.replace(/\/+$/, '')}/api/connectors/oauth/callback`;
+}
+
+export function buildAuthorizeUrl(
+  state: string,
+  scopes: string[] = ['refresh_token', 'api', 'chatter_api', 'id'],
+  redirect: string = redirectUri(),
+): string {
   if (!config.salesforce.mcpClientId) {
     throw new Error('SF_MCP_CLIENT_ID not configured');
   }
   const params = new URLSearchParams({
     response_type: 'code',
     client_id:     config.salesforce.mcpClientId,
-    redirect_uri:  redirectUri(),
+    redirect_uri:  redirect,
     scope:         scopes.join(' '),
     state,
     prompt:        'consent',
@@ -50,14 +59,14 @@ export interface SalesforceTokenResponse {
   expires_in?: number;
 }
 
-export async function exchangeCode(code: string): Promise<SalesforceTokenResponse> {
+export async function exchangeCode(code: string, redirect: string = redirectUri()): Promise<SalesforceTokenResponse> {
   if (!config.salesforce.mcpClientId || !config.salesforce.mcpClientSecret) {
     throw new Error('SF_MCP_CLIENT_ID / SF_MCP_CLIENT_SECRET not configured');
   }
   const params = new URLSearchParams({
     grant_type:    'authorization_code',
     code,
-    redirect_uri:  redirectUri(),
+    redirect_uri:  redirect,
     client_id:     config.salesforce.mcpClientId,
     client_secret: config.salesforce.mcpClientSecret,
   });

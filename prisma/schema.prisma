@@ -45,7 +45,7 @@ model Connector {
   createdAt           DateTime  @default(now())
   updatedAt           DateTime  @updatedAt
 
-  @@unique([orgId, providerKey])
+  @@unique([orgId, providerKey, configuredBy])
   @@index([orgId])
 }
 

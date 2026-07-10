@@ -13,6 +13,7 @@ import { logger } from '../../logger';
 import { ConnectorsRepo } from '../../db/connectors.repo';
 import { refreshGoogleToken } from '../../oauth/google';
 import { refreshMicrosoftToken } from '../../oauth/microsoft';
+import { refreshAccessToken as refreshSalesforceToken } from '../../oauth/salesforce';
 import type { AgentDefinition, AgentNode } from '../../types';
 import type { ChatTurnRequest } from './types';
 import type { Connector } from '@prisma/client';
@@ -23,7 +24,17 @@ import type { Connector } from '@prisma/client';
  */
 async function freshConnectorToken(row: Connector): Promise<string | null> {
   const SKEW_MS = 60_000;
-  const stale = !!row.tokenExpiresAt && row.tokenExpiresAt.getTime() - Date.now() < SKEW_MS;
+  const UNKNOWN_EXPIRY_MS = 20 * 60 * 1000;
+  let stale: boolean;
+  if (row.tokenExpiresAt) {
+    stale = row.tokenExpiresAt.getTime() - Date.now() < SKEW_MS;
+  } else if (row.providerKey === 'salesforce_mcp') {
+    // SF often omits expires_in and JWT access tokens live ~30 min —
+    // refresh when the row hasn't been touched in a while.
+    stale = Date.now() - row.updatedAt.getTime() > UNKNOWN_EXPIRY_MS;
+  } else {
+    stale = false;
+  }
   if (!stale || !row.refreshToken) return row.accessToken ?? null;
 
   try {
@@ -32,6 +43,16 @@ async function freshConnectorToken(row: Connector): Promise<string | null> {
       const updated = await ConnectorsRepo.updateTokens(row.id, {
         accessToken:    tok.access_token,
         tokenExpiresAt: tok.expires_in ? new Date(Date.now() + tok.expires_in * 1000) : null,
+      });
+      logger.info({ connectorId: row.id, provider: row.providerKey }, 'connector_token_refreshed');
+      return updated.accessToken;
+    }
+    if (row.providerKey === 'salesforce_mcp') {
+      const tok = await refreshSalesforceToken(row.refreshToken);
+      const updated = await ConnectorsRepo.updateTokens(row.id, {
+        accessToken:    tok.access_token,
+        tokenExpiresAt: tok.expires_in ? new Date(Date.now() + Number(tok.expires_in) * 1000) : null,
+        instanceUrl:    tok.instance_url ?? undefined,
       });
       logger.info({ connectorId: row.id, provider: row.providerKey }, 'connector_token_refreshed');
       return updated.accessToken;
@@ -133,7 +154,18 @@ export async function resolveMcpServers(
 
       let token: string | null = null;
       if (c.provider === 'salesforce_mcp') {
-        token = sfAccessToken;
+        // Hybrid auth: prefer the CHATTING USER's personal Salesforce
+        // connection (their record access) — fall back to the org-level
+        // Archon Setup tokens when they haven't connected their own.
+        const personal = await ConnectorsRepo
+          .getByOrgProviderAndUser(req.context.orgId, 'salesforce_mcp', req.context.userId)
+          .catch(() => null);
+        if (personal) {
+          token = await freshConnectorToken(personal);
+          logger.info({ orgId: req.context.orgId, userId: req.context.userId },
+            'sf_mcp_using_personal_connection');
+        }
+        if (!token) token = sfAccessToken;
       } else if (c.connectorId) {
         const row = await ConnectorsRepo.getById(req.context.orgId, c.connectorId).catch(() => null);
         token = row ? await freshConnectorToken(row) : null;

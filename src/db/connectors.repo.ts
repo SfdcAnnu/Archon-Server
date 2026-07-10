@@ -27,26 +27,41 @@ export const ConnectorsRepo = {
   },
 
   async getByOrgAndProvider(orgId: string, providerKey: string): Promise<Connector | null> {
-    return prisma.connector.findUnique({
-      where: { orgId_providerKey: { orgId, providerKey } },
+    return prisma.connector.findFirst({
+      where: { orgId, providerKey },
     });
   },
 
-  /** Upsert a Pending row before the OAuth round-trip starts. */
+  /** The chatting user's own connection for a provider (Connected only). */
+  async getByOrgProviderAndUser(orgId: string, providerKey: string, userId: string): Promise<Connector | null> {
+    return prisma.connector.findFirst({
+      where: { orgId, providerKey, configuredBy: userId, status: 'Connected' },
+    });
+  },
+
+  /** Upsert a Pending row before the OAuth round-trip starts.
+   *  Connections are PER USER (configuredBy) per provider per org. */
   async upsertPending(input: ConnectorInput): Promise<Connector> {
-    return prisma.connector.upsert({
-      where: { orgId_providerKey: { orgId: input.orgId, providerKey: input.providerKey } },
-      create: {
+    const existing = await prisma.connector.findFirst({
+      where: {
+        orgId:        input.orgId,
+        providerKey:  input.providerKey,
+        configuredBy: input.configuredBy ?? null,
+      },
+    });
+    if (existing) {
+      return prisma.connector.update({
+        where: { id: existing.id },
+        data: { displayName: input.displayName, status: 'Pending' },
+      });
+    }
+    return prisma.connector.create({
+      data: {
         orgId:        input.orgId,
         providerKey:  input.providerKey,
         displayName:  input.displayName,
         status:       'Pending',
         authType:     input.authType ?? 'OAuth2',
-        configuredBy: input.configuredBy ?? null,
-      },
-      update: {
-        displayName:  input.displayName,
-        status:       'Pending',
         configuredBy: input.configuredBy ?? null,
       },
     });
