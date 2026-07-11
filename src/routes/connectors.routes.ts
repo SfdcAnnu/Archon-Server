@@ -66,7 +66,11 @@ const OAUTH_PROVIDERS: Record<string, OAuthProvider> = {
   salesforce_mcp: {
     configured: () => !!(config.salesforce.mcpClientId && config.salesforce.mcpClientSecret),
     notConfiguredHint: 'Salesforce OAuth is not configured — set SF_MCP_CLIENT_ID and SF_MCP_CLIENT_SECRET in server/.env.',
-    authorizeUrl: (state, ctx) => buildAuthorizeUrl(state, ['refresh_token', 'api', 'chatter_api', 'id'], sfBrokerRedirectUri(), ctx.sfMyDomainUrl),
+    // Scopes/prompt/host must MIRROR the setup flow exactly — that flow is
+    // proven against the same External Client App. Requesting a scope the
+    // ECA doesn't have (e.g. chatter_api) fails at the approval step with
+    // OAUTH_APPROVAL_ERROR_GENERIC.
+    authorizeUrl: (state, ctx) => buildAuthorizeUrl(state, ['refresh_token', 'api', 'id'], sfBrokerRedirectUri(), ctx.sfMyDomainUrl),
     finish: async (code) => {
       const tok = await exchangeCode(code, sfBrokerRedirectUri());
       const who = await fetchUserInfo(tok.instance_url, tok.access_token);
@@ -152,7 +156,14 @@ connectorsRouter.post('/api/connectors/oauth/start', sessionAuth, async (req, re
     await PendingOAuthRepo.create({ state, orgId, providerKey, displayName, returnUrl, connectorId: connector.id });
     const install = await InstallsRepo.findByOrgId(orgId);
     const authorizeUrl = provider.authorizeUrl(state, { sfMyDomainUrl: install?.sfInstanceUrl ?? null });
-    logger.info({ orgId, providerKey }, 'connector_oauth_started');
+    logger.info({
+      orgId, providerKey, userId,
+      connectorId: connector.id,
+      state,
+      sfMyDomainUrl: install?.sfInstanceUrl ?? null,
+      returnUrl,
+      authorizeUrl,
+    }, 'connector_oauth_started');
     res.json({ connectorId: connector.id, authorizeUrl });
   } catch (err) {
     logger.error({ err, orgId, providerKey }, 'connector_oauth_start_failed');
@@ -166,12 +177,21 @@ connectorsRouter.post('/api/connectors/oauth/start', sessionAuth, async (req, re
 
 connectorsRouter.get('/api/connectors/oauth/callback', async (req, res) => {
   const { code, state, error, error_description: errorDescription } = req.query as Record<string, string | undefined>;
+  logger.info({
+    state,
+    hasCode: !!code,
+    codeLen: code?.length ?? 0,
+    error: error ?? null,
+    errorDescription: errorDescription ?? null,
+  }, 'connector_oauth_callback_received');
 
   const pending = state ? await PendingOAuthRepo.consume(state) : null;
   if (!pending) {
+    logger.warn({ state }, 'connector_oauth_callback_state_unknown');
     res.status(400).send(callbackPage(false, 'Invalid or expired OAuth state. Close this tab and try Connect again.'));
     return;
   }
+  logger.info({ orgId: pending.orgId, providerKey: pending.providerKey, connectorId: pending.connectorId }, 'connector_oauth_callback_state_ok');
 
   const bounce = (ok: boolean) => {
     try {
@@ -195,12 +215,20 @@ connectorsRouter.get('/api/connectors/oauth/callback', async (req, res) => {
   if (!provider || !pending.connectorId) { bounce(false); return; }
 
   try {
+    logger.info({ providerKey: pending.providerKey }, 'connector_oauth_exchanging_code');
     const result = await provider.finish(code);
     await ConnectorsRepo.markConnected(pending.connectorId, result);
-    logger.info({ orgId: pending.orgId, providerKey: pending.providerKey, accountEmail: result.accountEmail }, 'connector_oauth_connected');
+    logger.info({
+      orgId: pending.orgId,
+      providerKey: pending.providerKey,
+      accountEmail: result.accountEmail,
+      instanceUrl: result.instanceUrl ?? null,
+      hasRefreshToken: !!result.refreshToken,
+      tokenExpiresAt: result.tokenExpiresAt ?? null,
+    }, 'connector_oauth_connected');
     bounce(true);
   } catch (err) {
-    logger.error({ err, providerKey: pending.providerKey }, 'connector_oauth_finish_failed');
+    logger.error({ err: (err as Error).message, providerKey: pending.providerKey }, 'connector_oauth_finish_failed');
     await ConnectorsRepo.markError(pending.connectorId, (err as Error).message).catch(() => null);
     bounce(false);
   }

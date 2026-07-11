@@ -43,7 +43,7 @@ export function buildAuthorizeUrl(
     redirect_uri:  redirect,
     scope:         scopes.join(' '),
     state,
-    prompt:        'consent',
+    prompt:        'login consent',   // identical to the setup flow
   });
   // Authorize on the org's My Domain when we know it — some orgs (orgfarm
   // dev editions especially) reject the generic login host after consent.
@@ -76,7 +76,7 @@ export async function exchangeCode(code: string, redirect: string = redirectUri(
   });
 
   const { logger } = await import('../logger');
-  logger.info({ tokenUrl: `${loginHost()}${TOKEN_PATH}`, redirectUri: redirectUri(), codeLen: code.length }, 'sf_exchange_code_request');
+  logger.info({ tokenUrl: `${loginHost()}${TOKEN_PATH}`, redirectUri: redirect, codeLen: code.length }, 'sf_exchange_code_request');
 
   const res = await fetch(`${loginHost()}${TOKEN_PATH}`, {
     method: 'POST',
