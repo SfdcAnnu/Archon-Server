@@ -32,6 +32,7 @@ export function buildAuthorizeUrl(
   state: string,
   scopes: string[] = ['refresh_token', 'api', 'chatter_api', 'id'],
   redirect: string = redirectUri(),
+  authHost?: string | null,
 ): string {
   if (!config.salesforce.mcpClientId) {
     throw new Error('SF_MCP_CLIENT_ID not configured');
@@ -44,7 +45,10 @@ export function buildAuthorizeUrl(
     state,
     prompt:        'consent',
   });
-  return `${loginHost()}${AUTHORIZE_PATH}?${params.toString()}`;
+  // Authorize on the org's My Domain when we know it — some orgs (orgfarm
+  // dev editions especially) reject the generic login host after consent.
+  const host = (authHost || loginHost()).replace(/\/+$/, '');
+  return `${host}${AUTHORIZE_PATH}?${params.toString()}`;
 }
 
 export interface SalesforceTokenResponse {

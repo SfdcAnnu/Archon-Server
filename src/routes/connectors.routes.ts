@@ -38,10 +38,16 @@ export const connectorsRouter = Router();
 // Each provider knows how to build its authorize URL and finish the
 // exchange. Adding Outlook later = one more entry here.
 
+interface OAuthStartCtx {
+  /** The org's My Domain (from OrgInstall) — Salesforce authorize must run
+   *  there; orgfarm dev orgs error out on generic login.salesforce.com. */
+  sfMyDomainUrl?: string | null;
+}
+
 interface OAuthProvider {
   configured: () => boolean;
   notConfiguredHint: string;
-  authorizeUrl: (state: string) => string;
+  authorizeUrl: (state: string, ctx: OAuthStartCtx) => string;
   finish: (code: string) => Promise<{
     accessToken: string;
     refreshToken?: string | null;
@@ -60,7 +66,7 @@ const OAUTH_PROVIDERS: Record<string, OAuthProvider> = {
   salesforce_mcp: {
     configured: () => !!(config.salesforce.mcpClientId && config.salesforce.mcpClientSecret),
     notConfiguredHint: 'Salesforce OAuth is not configured — set SF_MCP_CLIENT_ID and SF_MCP_CLIENT_SECRET in server/.env.',
-    authorizeUrl: (state) => buildAuthorizeUrl(state, ['refresh_token', 'api', 'chatter_api', 'id'], sfBrokerRedirectUri()),
+    authorizeUrl: (state, ctx) => buildAuthorizeUrl(state, ['refresh_token', 'api', 'chatter_api', 'id'], sfBrokerRedirectUri(), ctx.sfMyDomainUrl),
     finish: async (code) => {
       const tok = await exchangeCode(code, sfBrokerRedirectUri());
       const who = await fetchUserInfo(tok.instance_url, tok.access_token);
@@ -144,7 +150,8 @@ connectorsRouter.post('/api/connectors/oauth/start', sessionAuth, async (req, re
     });
     const state = crypto.randomUUID();
     await PendingOAuthRepo.create({ state, orgId, providerKey, displayName, returnUrl, connectorId: connector.id });
-    const authorizeUrl = provider.authorizeUrl(state);
+    const install = await InstallsRepo.findByOrgId(orgId);
+    const authorizeUrl = provider.authorizeUrl(state, { sfMyDomainUrl: install?.sfInstanceUrl ?? null });
     logger.info({ orgId, providerKey }, 'connector_oauth_started');
     res.json({ connectorId: connector.id, authorizeUrl });
   } catch (err) {
