@@ -252,17 +252,42 @@ connectorsRouter.post('/api/mcp-tools', sessionAuth, async (req, res) => {
     return;
   }
   try {
-    // 60s: the MCP server may be cold-starting on Render's free tier.
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 60_000);
-    const r = await fetch(`${url}/tools`, { signal: controller.signal });
-    clearTimeout(timer);
-    if (!r.ok) {
-      res.status(502).json({ error: 'upstream_error', message: `MCP server returned ${r.status}` });
-      return;
+    // Render free-tier MCP servers answer 502/503 from the edge while the
+    // app cold-starts (~20-60s) — retry until the deadline instead of
+    // failing the user's first click.
+    const deadline = Date.now() + 75_000;
+    let lastStatus = 0;
+    let lastError  = '';
+    let attempt    = 0;
+    while (Date.now() < deadline) {
+      attempt++;
+      try {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), Math.min(30_000, deadline - Date.now()));
+        const r = await fetch(`${url}/tools`, { signal: controller.signal });
+        clearTimeout(timer);
+        if (r.ok) {
+          const json = (await r.json()) as { server?: string; tools?: unknown[] };
+          if (attempt > 1) logger.info({ url, attempt }, 'mcp_tools_proxy_recovered');
+          res.json({ server: json.server ?? null, tools: json.tools ?? [] });
+          return;
+        }
+        lastStatus = r.status;
+        if (r.status < 500) break;   // 4xx won't heal on retry
+        logger.warn({ url, status: r.status, attempt }, 'mcp_tools_proxy_upstream_5xx_retrying');
+      } catch (err) {
+        lastError = (err as Error).message;
+        logger.warn({ url, attempt, err: lastError }, 'mcp_tools_proxy_fetch_failed_retrying');
+      }
+      await new Promise(resolve => setTimeout(resolve, 5_000));
     }
-    const json = (await r.json()) as { server?: string; tools?: unknown[] };
-    res.json({ server: json.server ?? null, tools: json.tools ?? [] });
+    logger.warn({ url, lastStatus, lastError, attempt }, 'mcp_tools_proxy_gave_up');
+    res.status(502).json({
+      error: 'upstream_error',
+      message: lastStatus
+        ? `MCP server returned ${lastStatus} — it may still be waking up; try again in a minute.`
+        : `Could not reach the MCP server: ${lastError || 'timeout'}`,
+    });
   } catch (err) {
     logger.warn({ err, url }, 'mcp_tools_proxy_failed');
     res.status(502).json({ error: 'unreachable', message: 'Could not reach the MCP server /tools endpoint.' });
