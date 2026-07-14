@@ -165,7 +165,16 @@ export async function resolveMcpServers(
           logger.info({ orgId: req.context.orgId, userId: req.context.userId },
             'sf_mcp_using_personal_connection');
         }
-        if (!token) token = sfAccessToken;
+        if (!token) {
+          // PerUser agents must NOT fall back to the org token — that
+          // would silently widen the user's data access.
+          if (c.accessMode === 'PerUser') {
+            logger.warn({ orgId: req.context.orgId, userId: req.context.userId },
+              'sf_mcp_personal_connection_required');
+            throw new Error('This agent runs with each user\'s own Salesforce access, and your account is not connected yet. Click "Connect my Salesforce" in the chat panel, then send your message again.');
+          }
+          token = sfAccessToken;
+        }
       } else if (c.connectorId) {
         const row = await ConnectorsRepo.getById(req.context.orgId, c.connectorId).catch(() => null);
         token = row ? await freshConnectorToken(row) : null;

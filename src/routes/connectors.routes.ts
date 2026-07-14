@@ -294,6 +294,26 @@ connectorsRouter.post('/api/mcp-tools', sessionAuth, async (req, res) => {
   }
 });
 
+// ── POST /api/connectors/my-status ───────────────────────────────────
+// Chat users' self-service check: does the given user have a personal
+// connection for a provider? Called by the chat panel's connect card.
+
+connectorsRouter.post('/api/connectors/my-status', sessionAuth, async (req, res) => {
+  const orgId = req.orgId!;
+  const userId = String(req.body?.userId ?? '');
+  const providerKey = String(req.body?.providerKey ?? 'salesforce_mcp');
+  if (!userId) {
+    res.status(400).json({ error: 'missing_user', message: 'userId is required.' });
+    return;
+  }
+  const row = await ConnectorsRepo.getByOrgProviderAndUser(orgId, providerKey, userId);
+  res.json({
+    connected:       !!row,
+    accountEmail:    row?.accountEmail ?? null,
+    lastConnectedAt: row?.lastConnectedAt ?? null,
+  });
+});
+
 // ── GET /api/connectors ──────────────────────────────────────────────
 // Returns the per-org connector directory. SF MCP is synthesized from
 // OrgInstall; real Connector rows come from the DB.

@@ -50,6 +50,7 @@ const turnSchema = z.object({
     mcpServerUrl: z.string().url(),
     allowedTools: z.array(z.string()).default([]),
     connectorId:  z.string().nullish(),
+    accessMode:   z.string().nullish(),
   })).optional(),
   context: z.object({
     userId: z.string().min(1),
