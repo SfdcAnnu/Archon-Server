@@ -25,6 +25,7 @@ export interface ConnectorInput {
   allowedTools: string[];        // admin's tool selection; empty = all tools
   connectorId?: string | null;   // Node-side Connector row id (token lookup)
   accessMode?: string | null;    // salesforce_mcp only: 'Org' | 'PerUser'
+  customTools?: Array<{ type: string; name: string; label?: string | null }> | null; // org's own Apex actions / Flows
 }
 
 export interface EngineOverrideInput {

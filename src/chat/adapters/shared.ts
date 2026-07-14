@@ -184,8 +184,26 @@ export async function resolveMcpServers(
           'mcp_connector_skipped_no_token');
         continue;
       }
-      const allowedTools = await sanitizeAllowedTools(base, c.allowedTools ?? []);
-      out.push({ name, url: `${base}/mcp`, token, allowedTools });
+      let allowedTools = await sanitizeAllowedTools(base, c.allowedTools ?? []);
+
+      // Org-specific custom tools (Apex actions / Flows) — the MCP server
+      // registers them dynamically from the ?custom= query param and names
+      // them {type}__{safeName}. Their names must ride along in
+      // allowed_tools when a restriction list is active.
+      let url = `${base}/mcp`;
+      const custom = (c.customTools ?? []).filter(t =>
+        (t.type === 'apex' || t.type === 'flow') && /^[a-zA-Z0-9_.]{1,255}$/.test(t.name));
+      if (custom.length > 0) {
+        url += `?custom=${encodeURIComponent(custom.map(t => `${t.type}:${t.name}`).join(','))}`;
+        if (allowedTools.length > 0) {
+          const customNames = custom.map(t =>
+            `${t.type}__${t.name.replace(/[^a-zA-Z0-9_]/g, '_')}`.slice(0, 64));
+          allowedTools = [...allowedTools, ...customNames];
+        }
+        logger.info({ provider: c.provider, customCount: custom.length }, 'mcp_custom_tools_attached');
+      }
+
+      out.push({ name, url, token, allowedTools });
     }
     return out;
   }

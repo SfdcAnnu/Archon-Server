@@ -51,6 +51,11 @@ const turnSchema = z.object({
     allowedTools: z.array(z.string()).default([]),
     connectorId:  z.string().nullish(),
     accessMode:   z.string().nullish(),
+    customTools:  z.array(z.object({
+      type:  z.string().min(1),
+      name:  z.string().min(1),
+      label: z.string().nullish(),
+    })).nullish(),
   })).optional(),
   context: z.object({
     userId: z.string().min(1),

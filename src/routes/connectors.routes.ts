@@ -294,6 +294,62 @@ connectorsRouter.post('/api/mcp-tools', sessionAuth, async (req, res) => {
   }
 });
 
+// ── POST /api/sf/custom-actions ──────────────────────────────────────
+// Design-time discovery of the org's OWN automation for the custom-tool
+// picker: invocable Apex actions + autolaunched Flows, via the standard
+// invocable-actions REST API on the org connection.
+//   { mode: 'list' }                          → [{ type, name, label }]
+//   { mode: 'describe', type, name }          → { label, inputs: [...] }
+
+connectorsRouter.post('/api/sf/custom-actions', sessionAuth, async (req, res) => {
+  const orgId = req.orgId!;
+  const mode = String(req.body?.mode ?? 'list');
+  try {
+    const { getOrgConnection } = await import('../salesforce/per-org-connection');
+    const conn = await getOrgConnection(orgId);
+    const version = '62.0';
+
+    if (mode === 'list') {
+      const out: Array<{ type: string; name: string; label: string }> = [];
+      for (const type of ['apex', 'flow'] as const) {
+        try {
+          const r = await conn.request<{ actions?: Array<{ name: string; label?: string }> }>(
+            `/services/data/v${version}/actions/custom/${type}`);
+          for (const a of r?.actions ?? []) out.push({ type, name: a.name, label: a.label || a.name });
+        } catch (err) {
+          logger.warn({ orgId, type, err: (err as Error).message }, 'custom_actions_list_failed');
+        }
+      }
+      res.json({ actions: out });
+      return;
+    }
+
+    if (mode === 'describe') {
+      const type = String(req.body?.type ?? '');
+      const name = String(req.body?.name ?? '');
+      if ((type !== 'apex' && type !== 'flow') || !/^[a-zA-Z0-9_.]{1,255}$/.test(name)) {
+        res.status(400).json({ error: 'invalid_action', message: 'type must be apex|flow and name a valid API name.' });
+        return;
+      }
+      const r = await conn.request<{ label?: string; description?: string; inputs?: unknown[]; outputs?: unknown[] }>(
+        `/services/data/v${version}/actions/custom/${type}/${encodeURIComponent(name)}`);
+      res.json({
+        type, name,
+        label:       r?.label ?? name,
+        description: r?.description ?? null,
+        inputs:      r?.inputs ?? [],
+        outputs:     r?.outputs ?? [],
+      });
+      return;
+    }
+
+    res.status(400).json({ error: 'invalid_mode', message: "mode must be 'list' or 'describe'." });
+  } catch (err) {
+    logger.error({ orgId, err: (err as Error).message }, 'custom_actions_failed');
+    res.status(502).json({ error: 'sf_unreachable', message: (err as Error).message });
+  }
+});
+
 // ── POST /api/connectors/my-status ───────────────────────────────────
 // Chat users' self-service check: does the given user have a personal
 // connection for a provider? Called by the chat panel's connect card.
