@@ -1,3 +1,4 @@
+import type { Connection } from 'jsforce';
 import type { AgentDefinition, AgentNode, NodeResult } from '../types';
 import type { GraphAdjacency } from './graph';
 
@@ -19,6 +20,9 @@ export class ExecutionContext {
   readonly orgId: string;
   readonly userId: string;
   readonly inputPayload: Record<string, unknown>;
+  /** Per-org Salesforce connection (getOrgConnection) — action nodes read/write
+   *  through THIS, never a single shared bootstrap user. Multi-tenancy boundary. */
+  readonly conn: Connection;
   readonly state = new Map<string, Record<string, unknown>>();
   readonly toolsUsed = new Set<string>();
   readonly consumedCatalogIds = new Set<string>();
@@ -32,6 +36,7 @@ export class ExecutionContext {
     orgId: string;
     userId: string;
     inputPayload: Record<string, unknown>;
+    conn: Connection;
   }) {
     this.correlationId = args.correlationId;
     this.agent = args.agent;
@@ -39,6 +44,7 @@ export class ExecutionContext {
     this.orgId = args.orgId;
     this.userId = args.userId;
     this.inputPayload = args.inputPayload;
+    this.conn = args.conn;
   }
 
   /**

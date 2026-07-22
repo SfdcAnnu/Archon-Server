@@ -1,35 +1,47 @@
 import { Router } from 'express';
 import { z } from 'zod';
-import { jwtAuth } from '../auth/jwt';
+import { sessionAuth } from '../auth/session';
 import { logger } from '../logger';
 import { runAgent } from '../orchestrator/engine';
-import { loadAgentDefinition } from '../salesforce/client';
+import { getOrgConnection } from '../salesforce/per-org-connection';
+import { AgentCache } from '../chat/agent-cache';
 import { schedulePlatformEvent } from '../salesforce/callback';
 import type { AgentExecuteRequest, AgentExecuteResponse } from '../types';
 
 export const agentRouter = Router();
 
+/**
+ * Autonomous (non-chat) execution — record triggers, scheduled runs, Flow's
+ * AgentRunner invocable, and the builder's "Test run" all land here.
+ *
+ * sessionAuth (Bearer <OrgInstall.sessionKey>) replaces the old per-request
+ * JWT: orgId comes from the verified session, never trusted from the body,
+ * and the run executes through THIS org's own Salesforce connection
+ * (getOrgConnection) instead of one shared bootstrap user — the same
+ * multi-tenancy boundary chat already uses.
+ */
 const executeSchema = z.object({
   agentApiName: z.string().min(1),
   recordId: z.string().min(1),
-  orgId: z.string().min(1),
   userId: z.string().min(1),
   runMode: z.enum(['sync', 'async']).default('sync'),
   inputPayload: z.record(z.unknown()).default({}),
   department: z.string().optional(),
 });
 
-agentRouter.post('/agent/execute', jwtAuth, async (req, res) => {
+agentRouter.post('/api/agent/execute', sessionAuth, async (req, res) => {
+  const orgId = req.orgId!;
   const parsed = executeSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: 'invalid_request', details: parsed.error.flatten() });
     return;
   }
-  const request: AgentExecuteRequest = parsed.data;
-  const traceLogger = logger.child({ agentApiName: request.agentApiName, recordId: request.recordId });
+  const request: AgentExecuteRequest = { ...parsed.data, orgId };
+  const traceLogger = logger.child({ orgId, agentApiName: request.agentApiName, recordId: request.recordId });
 
   try {
-    const agent = await loadAgentDefinition(request.agentApiName);
+    const conn = await getOrgConnection(orgId);
+    const agent = await AgentCache.load(orgId, request.agentApiName, conn);
     if (!agent) {
       res.status(404).json({ error: 'agent_not_found', agentApiName: request.agentApiName });
       return;
@@ -50,10 +62,11 @@ agentRouter.post('/agent/execute', jwtAuth, async (req, res) => {
       res.status(202).json(ack);
 
       // Fire-and-forget
-      runAgent({ agent, request })
+      runAgent({ agent, request, conn })
         .then((result) => {
           traceLogger.info({ correlationId: result.correlationId, durationMs: result.durationMs }, 'async_run_complete');
           return schedulePlatformEvent({
+            orgId,
             agentApiName: request.agentApiName,
             recordId: request.recordId,
             result,
@@ -66,7 +79,7 @@ agentRouter.post('/agent/execute', jwtAuth, async (req, res) => {
     }
 
     // Sync path
-    const result = await runAgent({ agent, request });
+    const result = await runAgent({ agent, request, conn });
     const response: AgentExecuteResponse = {
       success: result.success,
       correlationId: result.correlationId,
@@ -89,9 +102,9 @@ agentRouter.post('/agent/execute', jwtAuth, async (req, res) => {
  * until the Platform Event lands. Keeps the API simple if a customer
  * can't subscribe to platform events.
  */
-agentRouter.get('/agent/status/:correlationId', jwtAuth, async (req, res) => {
+agentRouter.get('/api/agent/status/:correlationId', sessionAuth, async (req, res) => {
   // In a real system this would query a result store (Redis/postgres).
-  // MVP: tell the caller to subscribe to AgentExecutionResult__e instead.
+  // Phase 3 adds a persisted AgentRun table this can read from directly.
   res.json({
     correlationId: req.params.correlationId,
     note: 'For async results subscribe to the AgentExecutionResult__e Platform Event in Salesforce.',

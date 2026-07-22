@@ -17,7 +17,7 @@ function buildApp(): express.Express {
 
   app.use(healthRouter);
   app.use(setupRouter);      // app-level OAuth setup (no session yet)
-  app.use(agentRouter);      // /agent/execute still uses JWT — unchanged
+  app.use(agentRouter);      // /api/agent/execute — sessionAuth-guarded (autonomous runs)
   app.use(connectorsRouter); // sessionAuth-guarded
   app.use(chatRouter);       // /api/chat/* — sessionAuth-guarded
   app.use(engineRouter);     // /api/engine/test — sessionAuth-guarded

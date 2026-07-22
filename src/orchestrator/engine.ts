@@ -1,4 +1,5 @@
 import { randomUUID } from 'crypto';
+import type { Connection } from 'jsforce';
 import { ExecutionContext } from './context';
 import { buildGraph, findTrigger, nextNodes } from './graph';
 import { getExecutor, echoExecutor } from '../nodes/registry';
@@ -19,8 +20,9 @@ const MAX_NODES_PER_RUN = 100; // safety cap
 export async function runAgent(args: {
   agent: AgentDefinition;
   request: AgentExecuteRequest;
+  conn: Connection;
 }): Promise<GraphResult> {
-  const { agent, request } = args;
+  const { agent, request, conn } = args;
   const correlationId = randomUUID();
   const start = Date.now();
 
@@ -31,6 +33,7 @@ export async function runAgent(args: {
     orgId: request.orgId,
     userId: request.userId,
     inputPayload: request.inputPayload,
+    conn,
   });
 
   const graph = buildGraph(agent);

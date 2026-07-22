@@ -1,4 +1,4 @@
-import { getConnection } from './client';
+import { getOrgConnection } from './per-org-connection';
 import { config } from '../config';
 import { logger } from '../logger';
 import type { GraphResult } from '../types';
@@ -6,14 +6,19 @@ import type { GraphResult } from '../types';
 /**
  * Publish an AgentExecutionResult__e Platform Event so SF can update
  * AgentExecution__c records for async runs without polling.
+ *
+ * Uses the ORG's own connection (Archon Setup tokens), not the shared
+ * bootstrap user — publishing as a stranger to the org's own event bus
+ * would be a multi-tenancy leak.
  */
 export async function schedulePlatformEvent(args: {
+  orgId: string;
   agentApiName: string;
   recordId: string;
   result: GraphResult;
 }): Promise<void> {
   try {
-    const conn = await getConnection();
+    const conn = await getOrgConnection(args.orgId);
     const eventName = config.salesforce.callbackEvent;
     const payload = {
       AgentApiName__c: args.agentApiName,

@@ -20,11 +20,6 @@ export const config = {
   nodeEnv: process.env.NODE_ENV ?? 'development',
   logLevel: process.env.LOG_LEVEL ?? 'info',
 
-  jwt: {
-    secret: required('JWT_SECRET'),
-    alg: (optional('JWT_ALG', 'HS256') as 'HS256' | 'HS384' | 'HS512'),
-  },
-
   anthropic: {
     apiKey: optional('ANTHROPIC_API_KEY'),
   },
