@@ -11,6 +11,7 @@ import '../nodes/trigger';
 import '../nodes/logic';
 import '../nodes/end';
 import '../nodes/ai';
+import '../nodes/ai-step';   // registers claude/gpt4 — headless chat-adapter reuse (overrides ai.ts placeholders)
 import '../nodes/action';
 import '../nodes/channel';
 import '../nodes/tool-catalogs';
@@ -34,6 +35,7 @@ export async function runAgent(args: {
     userId: request.userId,
     inputPayload: request.inputPayload,
     conn,
+    engineOverride: request.engineOverride,
   });
 
   const graph = buildGraph(agent);

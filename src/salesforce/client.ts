@@ -93,10 +93,11 @@ export async function loadAgentDefinition(apiName: string, connOverride?: jsforc
     Department__c: string;
     KnowledgeBase__c?: string;
     Status__c: 'Active' | 'Draft' | 'Inactive';
+    AccessMode__c?: string;
     CanvasJson__c?: string;
     ExternalServerUrl__c?: string;
   }>(
-    `SELECT Id, Name, ApiName__c, Department__c, KnowledgeBase__c, Status__c, CanvasJson__c, ExternalServerUrl__c
+    `SELECT Id, Name, ApiName__c, Department__c, KnowledgeBase__c, Status__c, AccessMode__c, CanvasJson__c, ExternalServerUrl__c
      FROM AgentDefinition__c
      WHERE ApiName__c = '${apiName.replace(/'/g, "\\'")}'
      LIMIT 1`,
@@ -145,6 +146,7 @@ export async function loadAgentDefinition(apiName: string, connOverride?: jsforc
     department: def.Department__c,
     knowledgeBase: def.KnowledgeBase__c,
     status: def.Status__c,
+    accessMode: def.AccessMode__c,
     canvasJson: def.CanvasJson__c ? safeJson(def.CanvasJson__c) : undefined,
     externalServerUrl: def.ExternalServerUrl__c,
     nodes,

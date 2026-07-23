@@ -7,6 +7,17 @@
 
 export type RunMode = 'sync' | 'async';
 
+/** Mirrors chat/adapters/types.ts EngineOverrideInput — duplicated here
+ *  (rather than imported) to avoid a circular dependency, since that file
+ *  imports AgentDefinition FROM this one. */
+export interface EngineOverrideInput {
+  engineType?:   string;
+  apiKey?:       string;
+  endpoint?:     string;
+  defaultModel?: string;
+  connectionId?: string;
+}
+
 export interface AgentExecuteRequest {
   agentApiName: string;
   recordId: string;
@@ -16,6 +27,9 @@ export interface AgentExecuteRequest {
   inputPayload: Record<string, unknown>;
   // department is optional context — engine doesn't route on it
   department?: string;
+  // Running user's AI Engine Connection key, resolved by Apex — same
+  // per-request credential pattern chat already uses.
+  engineOverride?: EngineOverrideInput;
 }
 
 export interface AgentExecuteResponse {
@@ -58,6 +72,8 @@ export interface AgentDefinition {
   department?: string;
   knowledgeBase?: string;
   status: 'Active' | 'Draft' | 'Inactive';
+  /** 'Org' (default) | 'PerUser' — governs Salesforce MCP token selection. */
+  accessMode?: string;
   canvasJson?: { connections: AgentConnection[] };
   externalServerUrl?: string;
   nodes: AgentNode[];

@@ -27,6 +27,15 @@ const executeSchema = z.object({
   runMode: z.enum(['sync', 'async']).default('sync'),
   inputPayload: z.record(z.unknown()).default({}),
   department: z.string().optional(),
+  // Running user's AI Engine Connection key, resolved by Apex — same
+  // per-request credential pattern chat already uses.
+  engineOverride: z.object({
+    engineType:   z.string().optional(),
+    apiKey:       z.string().optional(),
+    endpoint:     z.string().optional(),
+    defaultModel: z.string().optional(),
+    connectionId: z.string().optional(),
+  }).optional(),
 });
 
 agentRouter.post('/api/agent/execute', sessionAuth, async (req, res) => {

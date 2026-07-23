@@ -1,5 +1,5 @@
 import type { Connection } from 'jsforce';
-import type { AgentDefinition, AgentNode, NodeResult } from '../types';
+import type { AgentDefinition, AgentNode, EngineOverrideInput, NodeResult } from '../types';
 import type { GraphAdjacency } from './graph';
 
 /**
@@ -23,6 +23,10 @@ export class ExecutionContext {
   /** Per-org Salesforce connection (getOrgConnection) — action nodes read/write
    *  through THIS, never a single shared bootstrap user. Multi-tenancy boundary. */
   readonly conn: Connection;
+  /** Running user's AI Engine Connection key (resolved by Apex), if any —
+   *  threaded to AI step nodes so flows use the SAME per-user credential
+   *  pattern chat already relies on. */
+  readonly engineOverride?: EngineOverrideInput;
   readonly state = new Map<string, Record<string, unknown>>();
   readonly toolsUsed = new Set<string>();
   readonly consumedCatalogIds = new Set<string>();
@@ -37,6 +41,7 @@ export class ExecutionContext {
     userId: string;
     inputPayload: Record<string, unknown>;
     conn: Connection;
+    engineOverride?: EngineOverrideInput;
   }) {
     this.correlationId = args.correlationId;
     this.agent = args.agent;
@@ -45,6 +50,7 @@ export class ExecutionContext {
     this.userId = args.userId;
     this.inputPayload = args.inputPayload;
     this.conn = args.conn;
+    this.engineOverride = args.engineOverride;
   }
 
   /**
