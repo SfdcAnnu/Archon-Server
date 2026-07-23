@@ -38,9 +38,11 @@ export interface AgentExecuteResponse {
   agentScore?: number;
   agentPriority?: 'Hot' | 'Warm' | 'Cold' | string;
   agentReason?: string;
-  agentStatus: 'QUEUED' | 'RUNNING' | 'SUCCESS' | 'ERROR' | 'TIMEOUT';
+  agentStatus: 'QUEUED' | 'RUNNING' | 'SUCCESS' | 'ERROR' | 'TIMEOUT' | 'WAITING' | 'WAITING_APPROVAL';
   agentOutputPayload?: string;
   toolsUsed?: string;
+  /** Present when the run paused instead of completing — Apex threads this back for later resume/lookup. */
+  runId?: string;
 }
 
 export interface AgentNode {
@@ -88,7 +90,8 @@ export interface NodeResult {
   error?: string;
   toolsUsed?: string[];
   // For if/else branching — the executor returns which port to follow next.
-  nextPort?: 'out' | 'yes' | 'no';
+  // 'out' | 'yes' | 'no' normally; loop bodies also use 'each'/'done'.
+  nextPort?: string;
   // For score-producing nodes (AI) — surfaces into the final response.
   score?: number;
   priority?: string;
@@ -96,6 +99,18 @@ export interface NodeResult {
   // Set Variable nodes register an EXTRA alias (their user-chosen name) —
   // resolved the same way as 'ai'/'record', e.g. {!myVariable.value}.
   customAlias?: string;
+  /** Wait/Approval nodes signal a pause instead of completing — the engine
+   *  persists the run and stops instead of continuing the BFS. */
+  pause?: NodePause;
+}
+
+export interface NodePause {
+  kind: 'wait' | 'approval';
+  /** wait — when the poller should resume this run. */
+  resumeAt?: string;
+  /** approval — matched on decide(); when the poller should auto-reject. */
+  approvalToken?: string;
+  timeoutAt?: string;
 }
 
 /** Result of running the whole agent graph. */
@@ -109,4 +124,7 @@ export interface GraphResult {
   agentOutputPayload: Record<string, unknown>;
   toolsUsed: string[];
   durationMs: number;
+  /** Present when agentStatus is WAITING/WAITING_APPROVAL — the AgentRun row to resume/decide against later. */
+  runId?: string;
+  approvalToken?: string;
 }

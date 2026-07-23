@@ -100,6 +100,60 @@ model PendingSetup {
   @@index([orgId])
 }
 
+// ── Durable runs (Wait / Approval / Loop) ───────────────────────────
+//
+// Every agent run gets a row here now, not just ones that pause — cheap
+// audit trail, and it means pause/resume is a natural extension of the
+// normal path rather than a special one. contextState/frontier/visited
+// are the serialized ExecutionContext + BFS queue the engine needs to
+// pick up exactly where it left off (see orchestrator/engine.ts
+// runLoop/resumeRun and orchestrator/context.ts toJSON/fromJSON).
+model AgentRun {
+  id            String    @id @default(uuid())
+  orgId         String
+  agentApiName  String
+  correlationId String    @unique
+  recordId      String?
+  userId        String?
+  // RUNNING | WAITING | WAITING_APPROVAL | SUCCESS | ERROR
+  status        String    @default("RUNNING")
+  contextState  Json      // ExecutionContext.state, serialized
+  aliases       Json      // ExecutionContext aliases, serialized
+  frontier      Json      // node ids still queued to run
+  visited       Json      // node ids already run (BFS de-dupe)
+  resumeAt      DateTime?          // wait — when the poller should resume this run
+  approvalToken String?   @unique  // approval — matched on decide()
+  // The node that actually paused (wait OR approval) — its downstream port
+  // was never queued at pause time (we returned before computing it), so
+  // resume needs this to know where to continue from: 'out' for wait,
+  // the decision ('approved'/'rejected') for approval.
+  pausedNodeId  String?
+  timeoutAt     DateTime?          // approval — auto-reject after this
+  lastError     String?
+  engineOverrideJson Json?         // persisted so resume doesn't need a fresh Apex round-trip
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  steps         RunStep[]
+
+  @@index([orgId, agentApiName])
+  @@index([status, resumeAt])
+}
+
+model RunStep {
+  id          String    @id @default(uuid())
+  runId       String
+  run         AgentRun  @relation(fields: [runId], references: [id], onDelete: Cascade)
+  nodeId      String
+  nodeSubType String
+  success     Boolean
+  output      Json?
+  error       String?
+  startedAt   DateTime  @default(now())
+  finishedAt  DateTime?
+
+  @@index([runId])
+}
+
 // ── RAG Knowledge Base ──────────────────────────────────────────────
 //
 // A customer's KB content can live in one of three places — the admin

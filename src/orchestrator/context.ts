@@ -32,6 +32,9 @@ export class ExecutionContext {
   readonly consumedCatalogIds = new Set<string>();
   graph!: GraphAdjacency;
   private aliases = new Map<string, string>();
+  /** Set once the engine has persisted an AgentRun row for this execution —
+   *  Wait/Approval executors need it to know which run to pause. */
+  runId?: string;
 
   constructor(args: {
     correlationId: string;
@@ -126,5 +129,35 @@ export class ExecutionContext {
       const v = this.resolve(path.trim());
       return v == null ? '' : String(v);
     });
+  }
+
+  // ── Durable-run (de)serialization ────────────────────────────────
+  // Splits across the two AgentRun JSON columns: `contextState` (node
+  // outputs + bookkeeping sets) and `aliases` (the flat name lookup).
+
+  serializeState(): { state: Record<string, Record<string, unknown>>; toolsUsed: string[]; consumedCatalogIds: string[] } {
+    return {
+      state: Object.fromEntries(this.state),
+      toolsUsed: Array.from(this.toolsUsed),
+      consumedCatalogIds: Array.from(this.consumedCatalogIds),
+    };
+  }
+
+  hydrateState(saved: { state?: Record<string, Record<string, unknown>>; toolsUsed?: string[]; consumedCatalogIds?: string[] }): void {
+    this.state.clear();
+    for (const [k, v] of Object.entries(saved.state ?? {})) this.state.set(k, v);
+    this.toolsUsed.clear();
+    (saved.toolsUsed ?? []).forEach((t) => this.toolsUsed.add(t));
+    this.consumedCatalogIds.clear();
+    (saved.consumedCatalogIds ?? []).forEach((id) => this.consumedCatalogIds.add(id));
+  }
+
+  serializeAliases(): Record<string, string> {
+    return Object.fromEntries(this.aliases);
+  }
+
+  hydrateAliases(saved: Record<string, string>): void {
+    this.aliases.clear();
+    for (const [k, v] of Object.entries(saved ?? {})) this.aliases.set(k, v);
   }
 }

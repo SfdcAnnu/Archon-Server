@@ -98,6 +98,7 @@ agentRouter.post('/api/agent/execute', sessionAuth, async (req, res) => {
       agentStatus: result.agentStatus,
       agentOutputPayload: JSON.stringify(result.agentOutputPayload),
       toolsUsed: result.toolsUsed.join(','),
+      runId: result.runId,
     };
     res.json(response);
   } catch (err) {

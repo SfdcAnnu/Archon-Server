@@ -9,6 +9,8 @@ import { setupRouter } from './routes/setup.routes';
 import { chatRouter } from './routes/chat.routes';
 import { engineRouter } from './routes/engine.routes';
 import { kbRouter } from './routes/kb.routes';
+import { runsRouter } from './routes/runs.routes';
+import { startRunPoller } from './scheduler/run-poller';
 
 function buildApp(): express.Express {
   const app = express();
@@ -23,6 +25,7 @@ function buildApp(): express.Express {
   app.use(chatRouter);       // /api/chat/* — sessionAuth-guarded
   app.use(engineRouter);     // /api/engine/test — sessionAuth-guarded
   app.use(kbRouter);         // /api/kb/* — sessionAuth-guarded
+  app.use(runsRouter);       // /api/agent/runs/resume — sessionAuth-guarded
 
   // Final error handler
   app.use((err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
@@ -36,4 +39,5 @@ function buildApp(): express.Express {
 const app = buildApp();
 app.listen(config.port, () => {
   logger.info({ port: config.port, nodeEnv: config.nodeEnv }, 'archon_ai_server_started');
+  startRunPoller();
 });
