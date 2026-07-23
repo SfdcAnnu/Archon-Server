@@ -29,6 +29,12 @@ const aiStepExec = (subType: 'claude' | 'gpt4'): NodeExecutor => async (node, ct
       success: true,
       output: {
         finalText: cleanText,
+        // score/priority duplicated INSIDE output (not just top-level) —
+        // ExecutionContext.recordResult only copies `output` into ctx.state,
+        // so {!ai.score} / {!ai.priority} interpolation in a downstream
+        // if_else node reads from here, not from the NodeResult fields.
+        score,
+        priority,
         toolCalls: result.toolCalls,
         modelUsed: result.modelUsed,
         tokensIn: result.tokensIn,
