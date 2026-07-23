@@ -67,7 +67,7 @@ export async function runClaudeAdapter(
   }
 
   const model         = creds.defaultModel || (aiNode.config as { model?: string })?.model || 'claude-sonnet-4-6';
-  const systemPrompt  = buildSystemPrompt(req.agent, aiNode, req.context);
+  const systemPrompt  = await buildSystemPrompt(req.agent, aiNode, req.context, req.newUserMessage, req.engineOverride);
   // Attachments are opt-in. When the turn has none, we make ZERO Salesforce
   // calls, ZERO jsforce init, ZERO extra latency — the adapter goes straight
   // to Anthropic.

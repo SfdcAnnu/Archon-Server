@@ -8,6 +8,7 @@ import { connectorsRouter } from './routes/connectors.routes';
 import { setupRouter } from './routes/setup.routes';
 import { chatRouter } from './routes/chat.routes';
 import { engineRouter } from './routes/engine.routes';
+import { kbRouter } from './routes/kb.routes';
 
 function buildApp(): express.Express {
   const app = express();
@@ -21,6 +22,7 @@ function buildApp(): express.Express {
   app.use(connectorsRouter); // sessionAuth-guarded
   app.use(chatRouter);       // /api/chat/* — sessionAuth-guarded
   app.use(engineRouter);     // /api/engine/test — sessionAuth-guarded
+  app.use(kbRouter);         // /api/kb/* — sessionAuth-guarded
 
   // Final error handler
   app.use((err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {

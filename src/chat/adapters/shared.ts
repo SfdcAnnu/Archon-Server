@@ -14,8 +14,9 @@ import { ConnectorsRepo } from '../../db/connectors.repo';
 import { refreshGoogleToken } from '../../oauth/google';
 import { refreshMicrosoftToken } from '../../oauth/microsoft';
 import { refreshAccessToken as refreshSalesforceToken } from '../../oauth/salesforce';
+import { hasReadyKbDocuments, retrieveKb, formatKbContext } from '../../kb/retriever';
 import type { AgentDefinition, AgentNode } from '../../types';
-import type { ChatTurnRequest } from './types';
+import type { ChatTurnRequest, EngineOverrideInput } from './types';
 import type { Connector } from '@prisma/client';
 
 /**
@@ -267,17 +268,48 @@ export function discoverAllowedTools(
   return { allowedTools, catalogFound: true };
 }
 
-export function buildSystemPrompt(
+/**
+ * Real RAG retrieval, when the agent has indexed documents; null when it
+ * doesn't (or a lookup fails) so the caller can fall back to the raw
+ * Notes text — never breaks an agent that hasn't uploaded anything.
+ */
+async function buildKbBlock(
+  orgId: string,
+  agent: AgentDefinition,
+  query: string,
+  engineOverride?: EngineOverrideInput | null,
+): Promise<string | null> {
+  try {
+    const has = await hasReadyKbDocuments(orgId, agent.apiName);
+    if (!has) return null;
+    const chunks = await retrieveKb({ orgId, agentApiName: agent.apiName, query, engineOverride });
+    const block = formatKbContext(chunks);
+    if (!block) return null;
+    return 'KNOWLEDGE BASE (most relevant passages for this question):\n' + block;
+  } catch (err) {
+    logger.error({ err, orgId, agent: agent.apiName }, 'kb_retrieval_failed_falling_back');
+    return null;
+  }
+}
+
+export async function buildSystemPrompt(
   agent: AgentDefinition,
   aiNode: AgentNode,
   ctx:   ChatTurnRequest['context'],
-): string {
+  query: string,
+  engineOverride?: EngineOverrideInput | null,
+): Promise<string> {
   const config = (aiNode.config as { systemPrompt?: string }) ?? {};
   const parts: string[] = [];
 
   parts.push(`You are ${agent.name}, a Salesforce-embedded AI agent in chat mode.`);
 
-  if (agent.knowledgeBase && agent.knowledgeBase.trim().length > 0) {
+  const kbBlock = await buildKbBlock(ctx.orgId, agent, query, engineOverride);
+  if (kbBlock) {
+    parts.push(kbBlock);
+  } else if (agent.knowledgeBase && agent.knowledgeBase.trim().length > 0) {
+    // No indexed documents yet (or retrieval unavailable) — fall back to
+    // the raw Notes text verbatim, same behavior as before RAG existed.
     parts.push('KNOWLEDGE BASE:\n' + agent.knowledgeBase);
   }
   if (config.systemPrompt && config.systemPrompt.trim().length > 0) {

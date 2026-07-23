@@ -58,7 +58,7 @@ export async function runOpenAiAdapter(
   }
 
   const model        = creds.defaultModel || (aiNode.config as { model?: string })?.model || 'gpt-4o';
-  const systemPrompt = buildSystemPrompt(req.agent, aiNode, req.context);
+  const systemPrompt = await buildSystemPrompt(req.agent, aiNode, req.context, req.newUserMessage, req.engineOverride);
   // Attachments are opt-in — skip the whole helper (no jsforce, no SF calls)
   // when the turn has none.
   const attachments = (req.attachments && req.attachments.length > 0)
