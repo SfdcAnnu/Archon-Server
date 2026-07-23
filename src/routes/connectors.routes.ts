@@ -294,6 +294,55 @@ connectorsRouter.post('/api/mcp-tools', sessionAuth, async (req, res) => {
   }
 });
 
+// ── POST /api/mcp-tool-schemas ────────────────────────────────────────
+// Design-time, AUTHENTICATED tool list WITH real input schemas — used by
+// the canvas's generic "Call a Tool" action node to build its param-field
+// UI. Different from the public GET /tools catalog (metadata only, no
+// schema) and from the old salesforce_mcp-only /api/connectors/:id/tools —
+// this works for ANY provider, using the same hybrid token resolution the
+// flow engine's call_tool executor uses.
+//   Body: { provider, connectorId? } → { tools: [{name, description, inputSchema}] }
+
+connectorsRouter.post('/api/mcp-tool-schemas', sessionAuth, async (req, res) => {
+  const orgId = req.orgId!;
+  const provider = String(req.body?.provider ?? '');
+  const connectorId = req.body?.connectorId ? String(req.body.connectorId) : null;
+  if (!provider) {
+    res.status(400).json({ error: 'missing_provider' });
+    return;
+  }
+  try {
+    const { getOrgConnection } = await import('../salesforce/per-org-connection');
+    const { resolveProviderToken } = await import('../chat/adapters/shared');
+    const conn = await getOrgConnection(orgId);
+
+    const catalogRes = await conn.query<{ McpServerUrl__c?: string }>(
+      `SELECT McpServerUrl__c FROM ConnectorCatalog__mdt WHERE DeveloperName = '${provider.replace(/'/g, "\\'")}' LIMIT 1`,
+    );
+    const baseUrl = catalogRes.records[0]?.McpServerUrl__c;
+    if (!baseUrl) {
+      res.status(404).json({ error: 'provider_not_found', message: `No McpServerUrl__c for provider "${provider}".` });
+      return;
+    }
+
+    const install = await InstallsRepo.findByOrgId(orgId);
+    const token = await resolveProviderToken({
+      orgId, userId: String(req.body?.userId ?? ''), provider, connectorId,
+      sfAccessToken: install?.sfAccessToken ?? null,
+    });
+    if (!token) {
+      res.status(409).json({ error: 'not_connected', message: `No connected account for provider "${provider}".` });
+      return;
+    }
+
+    const tools = await mcpListTools({ remoteUrl: baseUrl, accessToken: token });
+    res.json({ tools });
+  } catch (err) {
+    logger.error({ err, orgId, provider }, 'mcp_tool_schemas_failed');
+    res.status(502).json({ error: 'tool_schemas_failed', message: (err as Error).message });
+  }
+});
+
 // ── POST /api/sf/custom-actions ──────────────────────────────────────
 // Design-time discovery of the org's OWN automation for the custom-tool
 // picker: invocable Apex actions + autolaunched Flows, via the standard

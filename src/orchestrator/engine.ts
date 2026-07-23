@@ -13,6 +13,7 @@ import '../nodes/end';
 import '../nodes/ai';
 import '../nodes/ai-step';   // registers claude/gpt4 — headless chat-adapter reuse (overrides ai.ts placeholders)
 import '../nodes/action';
+import '../nodes/call-tool'; // generic deterministic tool-call action node
 import '../nodes/channel';
 import '../nodes/tool-catalogs';
 

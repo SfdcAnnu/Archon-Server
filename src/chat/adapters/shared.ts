@@ -22,7 +22,7 @@ import type { Connector } from '@prisma/client';
  * Return a FRESH access token for a connector row, refreshing when the
  * stored one is expired/near expiry. Google tokens live ~1 hour.
  */
-async function freshConnectorToken(row: Connector): Promise<string | null> {
+export async function freshConnectorToken(row: Connector): Promise<string | null> {
   const SKEW_MS = 60_000;
   const UNKNOWN_EXPIRY_MS = 20 * 60 * 1000;
   let stale: boolean;
@@ -137,6 +137,45 @@ async function sanitizeAllowedTools(baseUrl: string, allowedTools: string[]): Pr
   return valid;
 }
 
+/**
+ * Resolve the bearer token for ONE provider — the same hybrid-auth rule
+ * chat uses (personal Salesforce connection first, org fallback, PerUser
+ * hard-fail), extracted so the flow engine's generic call_tool node can
+ * reach a provider's MCP server without duplicating this logic.
+ */
+export async function resolveProviderToken(args: {
+  orgId: string;
+  userId: string;
+  provider: string;
+  connectorId?: string | null;
+  accessMode?: string | null;
+  sfAccessToken?: string | null;
+}): Promise<string | null> {
+  const { orgId, userId, provider, connectorId, accessMode, sfAccessToken } = args;
+  if (provider === 'salesforce_mcp') {
+    const personal = await ConnectorsRepo
+      .getByOrgProviderAndUser(orgId, 'salesforce_mcp', userId)
+      .catch(() => null);
+    if (personal) {
+      const token = await freshConnectorToken(personal);
+      if (token) {
+        logger.info({ orgId, userId }, 'sf_mcp_using_personal_connection');
+        return token;
+      }
+    }
+    if (accessMode === 'PerUser') {
+      logger.warn({ orgId, userId }, 'sf_mcp_personal_connection_required');
+      throw new Error('This agent runs with each user\'s own Salesforce access, and your account is not connected yet. Click "Connect my Salesforce" in the chat panel, then send your message again.');
+    }
+    return sfAccessToken ?? null;
+  }
+  if (connectorId) {
+    const row = await ConnectorsRepo.getById(orgId, connectorId).catch(() => null);
+    return row ? await freshConnectorToken(row) : null;
+  }
+  return null;
+}
+
 export async function resolveMcpServers(
   req: ChatTurnRequest,
   aiNode: AgentNode,
@@ -152,32 +191,14 @@ export async function resolveMcpServers(
       while (seen.has(name)) name = `${name}_2`;
       seen.add(name);
 
-      let token: string | null = null;
-      if (c.provider === 'salesforce_mcp') {
-        // Hybrid auth: prefer the CHATTING USER's personal Salesforce
-        // connection (their record access) — fall back to the org-level
-        // Archon Setup tokens when they haven't connected their own.
-        const personal = await ConnectorsRepo
-          .getByOrgProviderAndUser(req.context.orgId, 'salesforce_mcp', req.context.userId)
-          .catch(() => null);
-        if (personal) {
-          token = await freshConnectorToken(personal);
-          logger.info({ orgId: req.context.orgId, userId: req.context.userId },
-            'sf_mcp_using_personal_connection');
-        }
-        if (!token) {
-          // PerUser agents must NOT fall back to the org token — that
-          // would silently widen the user's data access.
-          if (c.accessMode === 'PerUser') {
-            logger.warn({ orgId: req.context.orgId, userId: req.context.userId },
-              'sf_mcp_personal_connection_required');
-            throw new Error('This agent runs with each user\'s own Salesforce access, and your account is not connected yet. Click "Connect my Salesforce" in the chat panel, then send your message again.');
-          }
-          token = sfAccessToken;
-        }
-      } else if (c.connectorId) {
-        const row = await ConnectorsRepo.getById(req.context.orgId, c.connectorId).catch(() => null);
-        token = row ? await freshConnectorToken(row) : null;
+      let token: string | null;
+      try {
+        token = await resolveProviderToken({
+          orgId: req.context.orgId, userId: req.context.userId,
+          provider: c.provider, connectorId: c.connectorId, accessMode: c.accessMode, sfAccessToken,
+        });
+      } catch (err) {
+        throw err; // PerUser hard-fail must still surface to the caller
       }
       if (!token) {
         logger.warn({ provider: c.provider, orgId: req.context.orgId },

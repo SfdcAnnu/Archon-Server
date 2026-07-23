@@ -26,6 +26,27 @@ const ifElseExec: NodeExecutor = async (node, ctx) => {
 
 register('if_else', ifElseExec);
 
+/**
+ * Set Variable — Flow-style Assignment. Interpolates `config.template` and
+ * stores it under the user-chosen `config.variableName`, which the engine
+ * registers as an EXTRA alias (see ExecutionContext.recordResult) so
+ * downstream nodes reference it the same way they reference {!ai.score}:
+ * `{!myVariableName.value}`.
+ */
+const setVariableExec: NodeExecutor = async (node, ctx) => {
+  const varName = String(node.config.variableName ?? '').trim();
+  const value = ctx.interpolate(String(node.config.template ?? ''));
+  return {
+    nodeId: node.id,
+    nodeSubType: 'set_variable',
+    success: true,
+    output: { value },
+    customAlias: varName || undefined,
+  };
+};
+
+register('set_variable', setVariableExec);
+
 /** Wait — async sleep. Capped at 30s for sync mode (Apex callout timeout). */
 const waitExec: NodeExecutor = async (node) => {
   const delay = Math.min(Number(node.config.delayMs ?? 0), 30_000);

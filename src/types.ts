@@ -93,6 +93,9 @@ export interface NodeResult {
   score?: number;
   priority?: string;
   reason?: string;
+  // Set Variable nodes register an EXTRA alias (their user-chosen name) —
+  // resolved the same way as 'ai'/'record', e.g. {!myVariable.value}.
+  customAlias?: string;
 }
 
 /** Result of running the whole agent graph. */

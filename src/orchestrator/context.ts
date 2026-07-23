@@ -79,6 +79,8 @@ export class ExecutionContext {
     if (result.output) this.state.set(node.id, result.output);
     // Latest node of each type becomes the canonical alias.
     this.aliases.set(node.nodeType, node.id);
+    // Set Variable nodes additionally register their user-chosen name.
+    if (result.customAlias) this.aliases.set(result.customAlias, node.id);
     if (result.toolsUsed) result.toolsUsed.forEach((t) => this.toolsUsed.add(t));
   }
 
