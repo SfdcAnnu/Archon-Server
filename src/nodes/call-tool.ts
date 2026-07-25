@@ -24,6 +24,7 @@ interface CallToolConfig {
   toolName?: string;         // standard MCP tool name, or Apex class / Flow API name
   customToolType?: 'apex' | 'flow';
   paramValues?: Record<string, string>;
+  outputVariable?: string;
 }
 
 const callToolExec: NodeExecutor = async (node, ctx) => {
@@ -64,6 +65,7 @@ const callToolExec: NodeExecutor = async (node, ctx) => {
       return {
         nodeId: node.id, nodeSubType: 'call_tool', success: true,
         output: { toolName, kind: 'custom', result: r.outputValues ?? {} },
+        customAlias: config.outputVariable || undefined,
         toolsUsed: [`${provider}:${toolName}`],
       };
     }
@@ -92,6 +94,7 @@ const callToolExec: NodeExecutor = async (node, ctx) => {
     return {
       nodeId: node.id, nodeSubType: 'call_tool', success: true,
       output: { toolName, kind: 'standard', result },
+      customAlias: config.outputVariable || undefined,
       toolsUsed: [`${provider}:${toolName}`],
     };
   } catch (err) {
