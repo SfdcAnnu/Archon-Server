@@ -53,15 +53,15 @@ agentRouter.post('/api/agent/execute', sessionAuth, async (req, res) => {
     const conn = await getOrgConnection(orgId);
     const agent = await AgentCache.load(orgId, request.agentApiName, conn);
     if (!agent) {
-      res.status(404).json({ error: 'agent_not_found', agentApiName: request.agentApiName });
+      res.status(404).json({ error: 'agent_not_found', agentApiName: request.agentApiName, message: `Agent "${request.agentApiName}" was not found.` });
       return;
     }
     if (agent.status !== 'Active' && !request.isTestRun) {
-      res.status(409).json({ error: 'agent_not_active', status: agent.status });
+      res.status(409).json({ error: 'agent_not_active', status: agent.status, message: `Agent is ${agent.status}, not Active — activate it before running it outside the Test Runner.` });
       return;
     }
     if (agent.status === 'Inactive') {
-      res.status(409).json({ error: 'agent_inactive', status: agent.status });
+      res.status(409).json({ error: 'agent_inactive', status: agent.status, message: 'Agent is Inactive and cannot be run.' });
       return;
     }
 
