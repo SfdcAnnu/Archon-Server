@@ -1,9 +1,13 @@
 import { GoogleGenerativeAI } from '@google/generative-ai';
-import { config } from '../../config';
 import { logger } from '../../logger';
 
 /**
  * Google Gemini integration — gemini-2.5-pro, gemini-2.5-flash, gemini-2.0-flash.
+ *
+ * The API key is always the caller's own AI Engine Connection (resolved via
+ * chat/engine-resolver.ts, same as claude/openai) — no shared server-side
+ * key, and no process-global client cache, since different orgs/users bring
+ * different keys.
  *
  * Caching: Gemini supports explicit context caching via the CachedContent API,
  * but it requires a separate create-cache call and a 5+ minute TTL. For agent
@@ -12,18 +16,8 @@ import { logger } from '../../logger';
  * customers wire CachedContent themselves for high-volume agents (TODO).
  */
 
-let _client: GoogleGenerativeAI | null = null;
-
-function getClient(): GoogleGenerativeAI {
-  if (_client) return _client;
-  if (!config.gemini.apiKey) {
-    throw new Error('GEMINI_API_KEY not set — required for gemini nodes');
-  }
-  _client = new GoogleGenerativeAI(config.gemini.apiKey);
-  return _client;
-}
-
 export interface GeminiCallArgs {
+  apiKey: string;
   model: string;
   systemPrompt: string;
   knowledgeBase?: string;
@@ -41,7 +35,7 @@ export interface GeminiCallResult {
 }
 
 export async function callGemini(args: GeminiCallArgs): Promise<GeminiCallResult> {
-  const client = getClient();
+  const client = new GoogleGenerativeAI(args.apiKey);
 
   const systemParts: string[] = [];
   if (args.knowledgeBase && args.knowledgeBase.trim().length > 0) {

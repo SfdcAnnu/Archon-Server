@@ -1,5 +1,6 @@
 import { register } from './registry';
 import { callGemini } from '../mcp/servers/gemini-models';
+import { resolveEngine } from '../chat/engine-resolver';
 import {
   getCatalogTools,
   type CatalogSubType,
@@ -82,7 +83,9 @@ const geminiExec: NodeExecutor = async (node, ctx) => {
   }
 
   try {
+    const creds = resolveEngine('gemini', ctx.engineOverride);
     const result = await callGemini({
+      apiKey: creds.apiKey,
       model: config.model || 'gemini-2.5-flash',
       systemPrompt: config.systemPrompt || '',
       knowledgeBase: config.useKnowledgeBase !== false ? ctx.agent.knowledgeBase : undefined,

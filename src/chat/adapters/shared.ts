@@ -304,13 +304,17 @@ export async function buildSystemPrompt(
 
   parts.push(`You are ${agent.name}, a Salesforce-embedded AI agent in chat mode.`);
 
+  // Business Rules/Knowledge (the agent's own Notes field) and uploaded/
+  // indexed KB documents are different kinds of content — hand-written
+  // instructions vs. searchable reference material — and are additive.
+  // Previously this was an either/or: once ANY document got indexed, the
+  // Notes text silently stopped reaching the model at all.
+  if (agent.knowledgeBase && agent.knowledgeBase.trim().length > 0) {
+    parts.push('BUSINESS RULES / KNOWLEDGE (always apply these):\n' + agent.knowledgeBase);
+  }
   const kbBlock = await buildKbBlock(ctx.orgId, agent, query, engineOverride);
   if (kbBlock) {
     parts.push(kbBlock);
-  } else if (agent.knowledgeBase && agent.knowledgeBase.trim().length > 0) {
-    // No indexed documents yet (or retrieval unavailable) — fall back to
-    // the raw Notes text verbatim, same behavior as before RAG existed.
-    parts.push('KNOWLEDGE BASE:\n' + agent.knowledgeBase);
   }
   if (config.systemPrompt && config.systemPrompt.trim().length > 0) {
     parts.push(config.systemPrompt);

@@ -13,9 +13,46 @@ import { resumeRunById } from '../orchestrator/engine';
 import { getOrgConnection } from '../salesforce/per-org-connection';
 import { AgentCache } from '../chat/agent-cache';
 import { RunsRepo } from '../db/runs.repo';
+import { schedulePlatformEvent } from '../salesforce/callback';
 import type { AgentExecuteResponse } from '../types';
 
 export const runsRouter = Router();
+
+/**
+ * Per-node trace for a run — what Execution Logs' "Node detail" view
+ * fetches. Looked up by correlationId since that's the one identifier
+ * Salesforce's AgentExecution__c already stores (there's no AgentRun.Id
+ * on the Salesforce side).
+ */
+runsRouter.get('/api/agent/runs/by-correlation/:correlationId/steps', sessionAuth, async (req, res) => {
+  const orgId = req.orgId!;
+  const correlationId = req.params.correlationId;
+  try {
+    const run = await RunsRepo.getByCorrelationId(orgId, correlationId);
+    if (!run) {
+      res.status(404).json({ error: 'run_not_found' });
+      return;
+    }
+    const steps = await RunsRepo.listSteps(run.id);
+    res.json({
+      status: run.status,
+      steps: steps.map((s) => ({
+        nodeId: s.nodeId,
+        nodeLabel: s.nodeLabel,
+        nodeSubType: s.nodeSubType,
+        input: s.input,
+        success: s.success,
+        output: s.output,
+        error: s.error,
+        startedAt: s.startedAt,
+        finishedAt: s.finishedAt,
+      })),
+    });
+  } catch (err) {
+    logger.error({ err, orgId, correlationId }, 'run_steps_fetch_failed');
+    res.status(500).json({ error: 'run_steps_failed', message: (err as Error).message });
+  }
+});
 
 const resumeSchema = z.object({
   runId: z.string().min(1).optional(),
@@ -65,6 +102,19 @@ runsRouter.post('/api/agent/runs/resume', sessionAuth, async (req, res) => {
     }
 
     const result = await resumeRunById({ orgId, runId: run.id, agent, conn, decision });
+
+    // Same reasoning as the poller's wait-resume path — the caller here is
+    // AgentApprovalController.decide(), which only persists AgentApproval__c,
+    // not AgentExecution__c. Push the outcome via platform event so the
+    // Execution Log reflects the real post-resume status instead of staying
+    // on WAITING_APPROVAL forever.
+    schedulePlatformEvent({
+      orgId,
+      agentApiName: run.agentApiName,
+      recordId: run.recordId ?? '',
+      result,
+    }).catch((err) => logger.error({ err, runId: run.id }, 'run_resume_platform_event_failed'));
+
     const response: AgentExecuteResponse = {
       success: result.success,
       correlationId: result.correlationId,

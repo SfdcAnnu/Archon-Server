@@ -144,7 +144,9 @@ model RunStep {
   runId       String
   run         AgentRun  @relation(fields: [runId], references: [id], onDelete: Cascade)
   nodeId      String
+  nodeLabel   String?   // human-readable label as configured on the canvas — nodeId alone isn't meaningful in the UI
   nodeSubType String
+  input       Json?     // the node's config as saved (pre-interpolation) — what it was asked to do
   success     Boolean
   output      Json?
   error       String?

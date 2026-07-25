@@ -3,12 +3,13 @@
  * `vector(1536)` column on KbChunk and whatever schema a BYO Postgres
  * backend is told to create).
  *
- * Uses the SAME credential resolution chat/flows already use
- * (resolveEngine) — a customer's own OpenAI key from AiEngineConnection__c
- * takes priority over the server's .env fallback, so their key (not
- * Archon's) is what actually calls out to OpenAI when they've configured
- * one. Anthropic-only orgs get resolveEngine's existing actionable error
- * ("Add one under AI Engine Setup...") — there is no Claude embeddings API.
+ * Uses the SAME credential resolution chat/flows already use (resolveEngine)
+ * — requires the customer's own OpenAI-type AiEngineConnection__c; there is
+ * no shared/server-side fallback key (see engine-resolver.ts). Orgs that
+ * only have a Claude/Gemini connection configured get resolveEngine's
+ * actionable error ("Add one under AI Engine Setup...") — there is no
+ * Claude/Gemini embeddings API, an OpenAI-type connection is required
+ * specifically for KB indexing even if it isn't used for chat.
  */
 import OpenAI from 'openai';
 import { resolveEngine } from '../chat/engine-resolver';

@@ -109,18 +109,30 @@ export const RunsRepo = {
   },
 
   async addStep(runId: string, args: {
-    nodeId: string; nodeSubType: string; success: boolean; output?: unknown; error?: string | null;
+    nodeId: string; nodeLabel?: string | null; nodeSubType: string; input?: unknown;
+    success: boolean; output?: unknown; error?: string | null;
   }): Promise<void> {
     await prisma.runStep.create({
       data: {
         runId,
         nodeId: args.nodeId,
+        nodeLabel: args.nodeLabel ?? null,
         nodeSubType: args.nodeSubType,
+        input: (args.input ?? null) as Prisma.InputJsonValue,
         success: args.success,
         output: (args.output ?? null) as Prisma.InputJsonValue,
         error: args.error ?? null,
         finishedAt: new Date(),
       },
     });
+  },
+
+  /** All steps for a run, oldest first — the per-node trace shown in Salesforce. */
+  async listSteps(runId: string) {
+    return prisma.runStep.findMany({ where: { runId }, orderBy: { startedAt: 'asc' } });
+  },
+
+  async getByCorrelationId(orgId: string, correlationId: string) {
+    return prisma.agentRun.findFirst({ where: { orgId, correlationId } });
   },
 };

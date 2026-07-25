@@ -35,6 +35,9 @@ export class ExecutionContext {
   /** Set once the engine has persisted an AgentRun row for this execution —
    *  Wait/Approval executors need it to know which run to pause. */
   runId?: string;
+  /** Backing data for {!user.*} / {!org.*} — populated once via loadStaticContext(). */
+  private userInfo?: Record<string, unknown>;
+  private orgInfo?: Record<string, unknown>;
 
   constructor(args: {
     correlationId: string;
@@ -87,6 +90,29 @@ export class ExecutionContext {
     if (result.toolsUsed) result.toolsUsed.forEach((t) => this.toolsUsed.add(t));
   }
 
+  /**
+   * Fetches the running user's and org's identity once per run so
+   * {!user.*} / {!org.*} resolve synchronously afterward. Called once
+   * right after construction (fresh run or resume) — cheap enough to
+   * re-run on resume rather than threading it through the durable
+   * checkpoint. Failures are swallowed: a bad/missing userId just means
+   * {!user.*} resolves to undefined, same as any other unset variable.
+   */
+  async loadStaticContext(): Promise<void> {
+    try {
+      if (this.userId) {
+        const res = await this.conn.query<Record<string, unknown>>(
+          `SELECT Id, Name, Email, Username FROM User WHERE Id = '${String(this.userId).replace(/'/g, "\\'")}' LIMIT 1`,
+        );
+        this.userInfo = res.records[0];
+      }
+    } catch { /* best-effort */ }
+    try {
+      const res = await this.conn.query<Record<string, unknown>>('SELECT Id, Name FROM Organization LIMIT 1');
+      this.orgInfo = res.records[0];
+    } catch { /* best-effort */ }
+  }
+
   /** Look up a value via `{!alias.field}` or `{!nodeId.field}` syntax. */
   resolve(path: string): unknown {
     const [head, ...rest] = path.split('.');
@@ -95,6 +121,8 @@ export class ExecutionContext {
     // Special roots
     if (head === 'recordId') return this.recordId;
     if (head === 'input') return this.getDeep(this.inputPayload, rest);
+    if (head === 'user') return this.getDeep(this.userInfo ?? {}, rest);
+    if (head === 'org') return this.getDeep(this.orgInfo ?? {}, rest);
     if (head === 'record') {
       // alias for trigger node output
       const triggerId = this.aliases.get('trigger');

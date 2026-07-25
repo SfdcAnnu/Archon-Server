@@ -24,6 +24,17 @@ export async function buildConnectorInputsFromAgent(
     if (row.McpServerUrl__c) urlByProvider.set(row.DeveloperName, row.McpServerUrl__c.replace(/\/+$/, ''));
   }
 
+  // Custom/client-added MCP servers — same open-extension-point pattern as
+  // Claude's own "add a custom MCP server" — providerKey is 'custom_<Id>'
+  // (see AgentConnectorController.getDirectory), so any catalog node bound
+  // to one resolves its URL here exactly like a packaged provider does.
+  const customRes = await conn.query<{ Id: string; McpServerUrl__c?: string }>(
+    'SELECT Id, McpServerUrl__c FROM CustomMcpServer__c WHERE IsActive__c = true',
+  );
+  for (const row of customRes.records) {
+    if (row.McpServerUrl__c) urlByProvider.set(`custom_${row.Id}`, row.McpServerUrl__c.replace(/\/+$/, ''));
+  }
+
   const out: ConnectorInput[] = [];
   for (const n of catalogNodes) {
     const cfg = n.config ?? {};

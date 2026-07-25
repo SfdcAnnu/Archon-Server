@@ -13,6 +13,15 @@ import { logger } from '../logger';
  * same Node process.
  */
 
+/** Every action node accepts an optional `outputVariable` name — set, it
+ *  registers a `customAlias` so later nodes can reference this node's
+ *  output as `{!thatName.field}` instead of the opaque node id, the same
+ *  mechanism `set_variable` already uses (see context.ts `recordResult`). */
+function outputAlias(node: { config: Record<string, unknown> }): string | undefined {
+  const name = String(node.config.outputVariable ?? '').trim();
+  return name || undefined;
+}
+
 const getRecord: NodeExecutor = async (node, ctx) => {
   const objectType = String(node.config.objectType ?? '');
   const fields = String(node.config.fields ?? 'Id,Name')
@@ -27,6 +36,7 @@ const getRecord: NodeExecutor = async (node, ctx) => {
       nodeSubType: 'get_record',
       success: true,
       output: rec as Record<string, unknown>,
+      customAlias: outputAlias(node),
       toolsUsed: ['salesforce-crm:get_record'],
     };
   } catch (err) {
@@ -53,6 +63,7 @@ const updateRecord: NodeExecutor = async (node, ctx) => {
       nodeSubType: 'update_record',
       success: true,
       output: res as unknown as Record<string, unknown>,
+      customAlias: outputAlias(node),
       toolsUsed: ['salesforce-crm:update_record'],
     };
   } catch (err) {
@@ -80,6 +91,7 @@ const createRecord: NodeExecutor = async (node, ctx) => {
       nodeSubType: 'create_record',
       success: true,
       output: res as unknown as Record<string, unknown>,
+      customAlias: outputAlias(node),
       toolsUsed: ['salesforce-crm:create_record'],
     };
   } catch (err) {
@@ -99,6 +111,7 @@ const queryRecords: NodeExecutor = async (node, ctx) => {
       nodeSubType: 'query_records',
       success: true,
       output: { records: res.records, count: res.records.length },
+      customAlias: outputAlias(node),
       toolsUsed: ['salesforce-crm:query'],
     };
   } catch (err) {
@@ -131,6 +144,7 @@ const createTask: NodeExecutor = async (node, ctx) => {
       nodeSubType: 'create_task',
       success: true,
       output: res as unknown as Record<string, unknown>,
+      customAlias: outputAlias(node),
       toolsUsed: ['salesforce-crm:create_task'],
     };
   } catch (err) {
@@ -150,6 +164,7 @@ const postChatter: NodeExecutor = async (node, ctx) => {
       nodeSubType: 'post_chatter',
       success: true,
       output: res as unknown as Record<string, unknown>,
+      customAlias: outputAlias(node),
       toolsUsed: ['salesforce-crm:post_chatter'],
     };
   } catch (err) {

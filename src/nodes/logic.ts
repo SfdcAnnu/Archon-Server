@@ -14,17 +14,40 @@ import type { ExecutionContext } from '../orchestrator/context';
  */
 const ifElseExec: NodeExecutor = async (node, ctx) => {
   const raw = String(node.config.condition ?? '').trim();
+  const unresolved = findUnresolvedTokens(raw, ctx);
   const condition = ctx.interpolate(raw);
   const result = evalCondition(condition);
+
+  const output: Record<string, unknown> = { condition, result };
+  if (unresolved.length > 0) {
+    // Common failure mode: {!ai.score} referenced before the AI node's reply
+    // actually ended with a parseable score/priority tail (best-effort text
+    // parsing — see parseScoreTail in chat/headless.ts) — the condition then
+    // silently evaluates against an empty string instead of erroring, which
+    // looks indistinguishable from "if/else is broken" in Execution Logs.
+    // Surfacing it here means the real cause shows up without guessing.
+    output.warning = `${unresolved.join(', ')} resolved to nothing — condition evaluated against an empty value.`;
+  }
 
   return {
     nodeId: node.id,
     nodeSubType: 'if_else',
     success: true,
-    output: { condition, result },
+    output,
     nextPort: result ? 'yes' : 'no',
   };
 };
+
+/** Which `{!...}` tokens in the raw condition resolve to null/undefined. */
+function findUnresolvedTokens(raw: string, ctx: ExecutionContext): string[] {
+  const tokens = raw.match(/\{!([^}]+)\}/g) ?? [];
+  const missing: string[] = [];
+  for (const t of tokens) {
+    const path = t.slice(2, -1).trim();
+    if (ctx.resolve(path) == null) missing.push(t);
+  }
+  return missing;
+}
 
 register('if_else', ifElseExec);
 

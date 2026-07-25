@@ -316,26 +316,44 @@ connectorsRouter.post('/api/mcp-tool-schemas', sessionAuth, async (req, res) => 
     const { resolveProviderToken } = await import('../chat/adapters/shared');
     const conn = await getOrgConnection(orgId);
 
-    const catalogRes = await conn.query<{ McpServerUrl__c?: string }>(
-      `SELECT McpServerUrl__c FROM ConnectorCatalog__mdt WHERE DeveloperName = '${provider.replace(/'/g, "\\'")}' LIMIT 1`,
-    );
-    const baseUrl = catalogRes.records[0]?.McpServerUrl__c;
+    // Custom/client-added MCP servers (providerKey 'custom_<Id>') have no
+    // Archon-managed OAuth connector — the URL is trusted directly, same as
+    // Claude's own "add a custom MCP server" flow. Any auth the server
+    // itself needs happens on its side, not ours.
+    const isCustom = provider.startsWith('custom_');
+    let baseUrl: string | undefined;
+    let token: string | null = null;
+
+    if (isCustom) {
+      const customId = provider.slice('custom_'.length);
+      const customRes = await conn.query<{ McpServerUrl__c?: string }>(
+        `SELECT McpServerUrl__c FROM CustomMcpServer__c WHERE Id = '${customId.replace(/'/g, "\\'")}' AND IsActive__c = true LIMIT 1`,
+      );
+      baseUrl = customRes.records[0]?.McpServerUrl__c;
+    } else {
+      const catalogRes = await conn.query<{ McpServerUrl__c?: string }>(
+        `SELECT McpServerUrl__c FROM ConnectorCatalog__mdt WHERE DeveloperName = '${provider.replace(/'/g, "\\'")}' LIMIT 1`,
+      );
+      baseUrl = catalogRes.records[0]?.McpServerUrl__c;
+    }
     if (!baseUrl) {
-      res.status(404).json({ error: 'provider_not_found', message: `No McpServerUrl__c for provider "${provider}".` });
+      res.status(404).json({ error: 'provider_not_found', message: `No MCP server URL for provider "${provider}".` });
       return;
     }
 
-    const install = await InstallsRepo.findByOrgId(orgId);
-    const token = await resolveProviderToken({
-      orgId, userId: String(req.body?.userId ?? ''), provider, connectorId,
-      sfAccessToken: install?.sfAccessToken ?? null,
-    });
-    if (!token) {
-      res.status(409).json({ error: 'not_connected', message: `No connected account for provider "${provider}".` });
-      return;
+    if (!isCustom) {
+      const install = await InstallsRepo.findByOrgId(orgId);
+      token = await resolveProviderToken({
+        orgId, userId: String(req.body?.userId ?? ''), provider, connectorId,
+        sfAccessToken: install?.sfAccessToken ?? null,
+      });
+      if (!token) {
+        res.status(409).json({ error: 'not_connected', message: `No connected account for provider "${provider}".` });
+        return;
+      }
     }
 
-    const tools = await mcpListTools({ remoteUrl: baseUrl, accessToken: token });
+    const tools = await mcpListTools({ remoteUrl: baseUrl, accessToken: token ?? '' });
     res.json({ tools });
   } catch (err) {
     logger.error({ err, orgId, provider }, 'mcp_tool_schemas_failed');

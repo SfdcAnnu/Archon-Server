@@ -30,6 +30,11 @@ export interface AgentExecuteRequest {
   // Running user's AI Engine Connection key, resolved by Apex — same
   // per-request credential pattern chat already uses.
   engineOverride?: EngineOverrideInput;
+  // Set only by the builder's Test Runner (via AgentBuilderController.executeAgent) —
+  // lets a Draft agent run without flipping it Active. Real automation (triggers,
+  // the AgentRunner Flow invocable, scheduled runs) never sets this and still
+  // requires Active.
+  isTestRun?: boolean;
 }
 
 export interface AgentExecuteResponse {

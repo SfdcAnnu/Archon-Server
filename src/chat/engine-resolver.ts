@@ -1,16 +1,21 @@
 /**
  * Engine credential resolver.
  *
- * The runtime chat turn payload from Apex includes an optional
+ * The runtime chat/flow payload from Apex includes an optional
  * `engineOverride: { engineType, apiKey, endpoint, defaultModel, connectionId }`
- * that was resolved from the running user's AiEngineConnection__c records.
+ * resolved from the running user's or org's AiEngineConnection__c records.
  *
- * If present → use it. Otherwise → fall back to the server's .env keys.
+ * There is deliberately NO server-side .env fallback: every org brings and
+ * pays for its own AI provider key. Falling back to a shared server key
+ * would mean every customer's agent traffic silently runs through — and
+ * bills to — the same provider account, which is both a tenancy leak and
+ * a cost/compliance problem for a multi-tenant product. If no connection
+ * is configured, this throws — the customer must add one under AI Engine
+ * Setup, there is no implicit default.
  *
  * We NEVER persist the key in Node — it's used per-request and dropped.
  * Apex is the source of truth; Node is stateless for credentials.
  */
-import { config } from '../config';
 
 export interface EngineOverride {
   engineType?:   string;
@@ -24,16 +29,14 @@ export interface ResolvedEngineCredentials {
   apiKey:       string;
   endpoint:     string | null;
   defaultModel: string | null;
-  source:       'user' | 'env';
+  source:       'user';
   connectionId: string | null;
 }
 
 /**
- * Resolve credentials for a specific engine, given the (optional) override
- * from Apex and the default fallbacks from .env.
- *
- * Throws if the resolved key would be empty (dev didn't set .env and the user
- * hasn't configured a connection).
+ * Resolve credentials for a specific engine from the Apex-supplied override.
+ * Throws if none is configured — see module docblock for why there is no
+ * .env fallback.
  */
 export function resolveEngine(
   engineType: 'claude' | 'openai' | 'gemini',
@@ -49,24 +52,7 @@ export function resolveEngine(
     };
   }
 
-  // Fall back to server-side .env
-  const envKey = engineType === 'claude' ? config.anthropic.apiKey
-              : engineType === 'openai' ? config.openai.apiKey
-              : engineType === 'gemini' ? config.gemini.apiKey
-              : '';
-
-  if (!envKey) {
-    throw new Error(
-      `No API key configured for ${engineType}. ` +
-      `Add one under AI Engine Setup, or set the server-side .env fallback.`,
-    );
-  }
-
-  return {
-    apiKey:       envKey,
-    endpoint:     null,
-    defaultModel: null,
-    source:       'env',
-    connectionId: null,
-  };
+  throw new Error(
+    `No AI Engine Connection configured for ${engineType}. Add one under AI Engine Setup and bind it to this agent's AI node — there is no default/shared key.`,
+  );
 }

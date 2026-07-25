@@ -14,6 +14,7 @@ import { RunsRepo } from '../db/runs.repo';
 import { resumeRunById } from '../orchestrator/engine';
 import { getOrgConnection } from '../salesforce/per-org-connection';
 import { AgentCache } from '../chat/agent-cache';
+import { schedulePlatformEvent } from '../salesforce/callback';
 import { logger } from '../logger';
 import type { AgentRun } from '@prisma/client';
 
@@ -60,6 +61,17 @@ async function resumeOne(run: AgentRun, decision: 'approved' | 'rejected' | unde
   }
   const result = await resumeRunById({ orgId: run.orgId, runId: run.id, agent, conn, decision });
   logger.info({ runId: run.id, agentStatus: result.agentStatus }, 'run_poller_resumed');
+
+  // Push the post-resume status (SUCCESS/ERROR, or another pause) back to
+  // AgentExecution__c — without this the Salesforce log stays stuck showing
+  // WAITING forever, since the poller resumes runs entirely in-process with
+  // no Apex round trip to report the outcome.
+  await schedulePlatformEvent({
+    orgId: run.orgId,
+    agentApiName: run.agentApiName,
+    recordId: run.recordId ?? '',
+    result,
+  }).catch((err) => logger.error({ err, runId: run.id }, 'run_poller_platform_event_failed'));
 }
 
 async function autoRejectOverdue(run: AgentRun): Promise<void> {

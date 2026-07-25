@@ -44,6 +44,7 @@ export async function runAgent(args: {
 
   const graph = buildGraph(agent);
   ctx.graph = graph;
+  await ctx.loadStaticContext();
   const trigger = findTrigger(graph);
   if (!trigger) {
     return errorResult(correlationId, start, 'No trigger node found in agent definition');
@@ -111,6 +112,7 @@ export async function resumeRunById(args: {
 
   const graph = buildGraph(agent);
   ctx.graph = graph;
+  await ctx.loadStaticContext();
 
   // The paused node's own downstream was never queued at pause time (the
   // engine returns before computing it) — seed it now from the decision
@@ -317,7 +319,14 @@ function extractInterpolationPath(template: string): string {
 async function persistStep(runId: string, node: AgentNode, result: NodeResult): Promise<void> {
   await RunsRepo.addStep(runId, {
     nodeId: node.id,
+    nodeLabel: node.name ?? null,
     nodeSubType: node.nodeSubType,
+    // The node's saved config, pre-interpolation — "what it was asked to
+    // do." Executors interpolate {!...} tokens internally and don't
+    // uniformly report the resolved values back out, so this is the
+    // consistent, always-available definition of "input" across every
+    // node type without having to touch every executor individually.
+    input: node.config ?? null,
     success: result.success,
     output: result.output,
     error: result.error ?? null,

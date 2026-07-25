@@ -36,6 +36,7 @@ const executeSchema = z.object({
     defaultModel: z.string().optional(),
     connectionId: z.string().optional(),
   }).optional(),
+  isTestRun: z.boolean().optional().default(false),
 });
 
 agentRouter.post('/api/agent/execute', sessionAuth, async (req, res) => {
@@ -55,8 +56,12 @@ agentRouter.post('/api/agent/execute', sessionAuth, async (req, res) => {
       res.status(404).json({ error: 'agent_not_found', agentApiName: request.agentApiName });
       return;
     }
-    if (agent.status !== 'Active') {
+    if (agent.status !== 'Active' && !request.isTestRun) {
       res.status(409).json({ error: 'agent_not_active', status: agent.status });
+      return;
+    }
+    if (agent.status === 'Inactive') {
+      res.status(409).json({ error: 'agent_inactive', status: agent.status });
       return;
     }
 
