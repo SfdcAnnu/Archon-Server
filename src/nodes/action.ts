@@ -13,6 +13,35 @@ import { logger } from '../logger';
  * same Node process.
  */
 
+/**
+ * Parses a fieldMappings template as JSON FIRST, then interpolates each
+ * resulting string VALUE individually — not the other way around.
+ *
+ * Interpolating the raw template text before parsing (the previous
+ * approach) breaks the instant an interpolated value contains a character
+ * JSON needs escaped — a double quote or a raw newline — which is exactly
+ * what AI-generated text ({!ai.finalText}, multi-line reasoning, etc.)
+ * routinely contains. Parsing the template first means the {!...} tokens
+ * are still plain, quote-free substrings when JSON.parse runs, so the
+ * template itself is always valid; only after that do we substitute in
+ * whatever the AI actually said, as a normal JS string value that needs
+ * no escaping at all.
+ */
+function parseFieldMappings(raw: string, ctx: { interpolate: (s: string) => string }): Record<string, unknown> {
+  const parsed: unknown = JSON.parse(raw);
+  const walk = (val: unknown): unknown => {
+    if (typeof val === 'string') return ctx.interpolate(val);
+    if (Array.isArray(val)) return val.map(walk);
+    if (val && typeof val === 'object') {
+      const out: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(val as Record<string, unknown>)) out[k] = walk(v);
+      return out;
+    }
+    return val;
+  };
+  return walk(parsed) as Record<string, unknown>;
+}
+
 /** Every action node accepts an optional `outputVariable` name — set, it
  *  registers a `customAlias` so later nodes can reference this node's
  *  output as `{!thatName.field}` instead of the opaque node id, the same
@@ -50,7 +79,7 @@ const updateRecord: NodeExecutor = async (node, ctx) => {
   const rawMappings = String(node.config.fieldMappings ?? '{}');
   let mappings: Record<string, unknown>;
   try {
-    mappings = JSON.parse(ctx.interpolate(rawMappings));
+    mappings = parseFieldMappings(rawMappings, ctx);
   } catch {
     return { nodeId: node.id, nodeSubType: 'update_record', success: false, error: 'fieldMappings is not valid JSON' };
   }
@@ -76,7 +105,7 @@ const createRecord: NodeExecutor = async (node, ctx) => {
   const rawMappings = String(node.config.fieldMappings ?? '{}');
   let mappings: Record<string, unknown>;
   try {
-    mappings = JSON.parse(ctx.interpolate(rawMappings));
+    mappings = parseFieldMappings(rawMappings, ctx);
   } catch {
     return { nodeId: node.id, nodeSubType: 'create_record', success: false, error: 'fieldMappings is not valid JSON' };
   }
