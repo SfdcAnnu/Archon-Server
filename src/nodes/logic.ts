@@ -1,4 +1,3 @@
-import { randomUUID } from 'crypto';
 import { register } from './registry';
 import type { NodeExecutor } from './registry';
 import type { ExecutionContext } from '../orchestrator/context';
@@ -125,99 +124,67 @@ register('loop', async (node) => ({
 }));
 
 /**
- * Approval — resolves an approver from the trigger record (supports
- * relationship paths like "Owner.ManagerId"), creates a real
- * AgentApproval__c record in the customer's org, then pauses. Resumes via
- * AgentApprovalController.decide() -> POST /api/agent/runs/resume, or the
- * poller's timeout sweep if nobody responds in time.
+ * Approval — submits the trigger record into a REAL Salesforce Approval
+ * Process (native REST "Process Approval Requests" resource), then pauses.
+ * Salesforce's own tooling handles routing/notification/decision entirely
+ * (email, mobile, Chatter, Home page "Items to Approve") — no custom
+ * approver-resolution or approval object of our own.
+ *
+ * Resume path: the admin adds two packaged Outbound Messages as this
+ * Approval Process's Final Approval/Rejection Actions, pointing at
+ * POST /api/webhooks/approval-decision/{approved|rejected} on this server.
+ * The webhook resumes the paused run by orgId + recordId (see
+ * routes/webhooks.routes.ts). The poller's timeoutHours sweep is a
+ * separate "give up waiting" safety valve, unrelated to how the real
+ * decision is discovered.
  */
-const approvalExec: NodeExecutor = async (node, ctx) => {
-  const config = node.config as { approverField?: string; timeoutHours?: number };
-  const approverField = String(config.approverField ?? 'OwnerId').trim() || 'OwnerId';
-  const timeoutHours = Number(config.timeoutHours) || 0;
+interface ApprovalSubmitResult {
+  instanceId?: string;
+  instanceStatus?: string;
+  success?: boolean;
+  errors?: Array<{ message?: string }> | null;
+}
 
-  const approverId = await resolveApprover(ctx, approverField);
-  if (!approverId) {
-    return {
-      nodeId: node.id, nodeSubType: 'approval', success: false,
-      error: `Could not resolve an approver from field "${approverField}" on the trigger record.`,
-    };
+const approvalExec: NodeExecutor = async (node, ctx) => {
+  const config = node.config as { processDefinitionId?: string; comments?: string; timeoutHours?: number };
+  const timeoutHours = Number(config.timeoutHours) || 0;
+  const comments = config.comments ? ctx.interpolate(config.comments) : undefined;
+
+  if (!ctx.recordId) {
+    return { nodeId: node.id, nodeSubType: 'approval', success: false, error: 'Approval node requires a trigger record — no recordId on this run.' };
   }
 
-  const approvalToken = randomUUID();
-  const timeoutAt = timeoutHours > 0 ? new Date(Date.now() + timeoutHours * 3_600_000) : null;
+  const request: Record<string, unknown> = { actionType: 'Submit', contextId: ctx.recordId };
+  if (config.processDefinitionId) request.processDefinitionNameOrId = config.processDefinitionId;
+  if (comments) request.comments = comments;
 
-  await ctx.conn.sobject('AgentApproval__c').create({
-    AgentRunId__c: ctx.runId ?? '',
-    AgentApiName__c: ctx.agent.apiName,
-    NodeLabel__c: node.name?.slice(0, 255) ?? 'Approval',
-    RecordId__c: ctx.recordId || null,
-    ApproverId__c: approverId,
-    Status__c: 'Pending',
-    ApprovalToken__c: approvalToken,
-    TimeoutAt__c: timeoutAt ? timeoutAt.toISOString() : null,
-  });
+  try {
+    const res = await ctx.conn.request<ApprovalSubmitResult[]>({
+      method: 'POST',
+      url: `/services/data/v${ctx.conn.version}/process/approvals/`,
+      body: JSON.stringify({ requests: [request] }),
+      headers: { 'Content-Type': 'application/json' },
+    });
+    const result = res?.[0];
+    if (!result?.success || !result.instanceId) {
+      const message = result?.errors?.[0]?.message || 'Submission did not return a process instance.';
+      return { nodeId: node.id, nodeSubType: 'approval', success: false, error: message };
+    }
 
-  return {
-    nodeId: node.id,
-    nodeSubType: 'approval',
-    success: true,
-    output: { approvalToken, approverId, status: 'Pending' },
-    pause: { kind: 'approval', approvalToken, timeoutAt: timeoutAt?.toISOString() },
-  };
+    const timeoutAt = timeoutHours > 0 ? new Date(Date.now() + timeoutHours * 3_600_000) : null;
+    return {
+      nodeId: node.id,
+      nodeSubType: 'approval',
+      success: true,
+      output: { instanceId: result.instanceId, status: result.instanceStatus ?? 'Pending' },
+      pause: { kind: 'approval', approvalToken: result.instanceId, timeoutAt: timeoutAt?.toISOString() },
+    };
+  } catch (err) {
+    return { nodeId: node.id, nodeSubType: 'approval', success: false, error: (err as Error).message };
+  }
 };
 
 register('approval', approvalExec);
-
-/** Walks a (possibly dotted, e.g. "Owner.ManagerId") field path against the trigger record via a fresh SOQL query. */
-async function resolveApprover(ctx: ExecutionContext, approverField: string): Promise<string | null> {
-  const triggerNode = ctx.agent.nodes.find((n) => n.nodeType === 'trigger');
-  const objectType = (triggerNode?.config as { objectType?: string } | undefined)?.objectType;
-  if (!objectType || !ctx.recordId) return null;
-
-  const safeField = approverField.replace(/[^a-zA-Z0-9_.]/g, '');
-  if (!safeField) return null;
-  const safeRecordId = ctx.recordId.replace(/[^a-zA-Z0-9]/g, '');
-  const parts = safeField.split('.');
-
-  try {
-    // "Owner.X" is the common case for approval routing, but Owner is a
-    // polymorphic relationship on Lead/Case/Task (a User OR a Queue) —
-    // Salesforce's query API resolves dot-traversal on it through a generic
-    // interface that only exposes fields common to every possible type, so
-    // `SELECT Owner.ManagerId` fails with INVALID_FIELD even when the owner
-    // genuinely is a User with a manager. Resolve OwnerId first, then query
-    // User directly for the rest of the path — also naturally (and
-    // correctly) yields "no approver" when a Queue owns the record.
-    if (parts[0] === 'Owner' && parts.length > 1) {
-      const ownerRes = await ctx.conn.query<{ OwnerId?: string }>(
-        `SELECT OwnerId FROM ${objectType} WHERE Id = '${safeRecordId}' LIMIT 1`,
-      );
-      const ownerId = ownerRes.records[0]?.OwnerId;
-      if (!ownerId || !ownerId.startsWith('005')) return null; // Queue-owned or missing
-      return resolveDotPath(ctx, 'User', ownerId, parts.slice(1));
-    }
-    return resolveDotPath(ctx, objectType, safeRecordId, parts);
-  } catch {
-    return null;
-  }
-}
-
-async function resolveDotPath(
-  ctx: ExecutionContext, objectType: string, recordId: string, parts: string[],
-): Promise<string | null> {
-  const res = await ctx.conn.query<Record<string, unknown>>(
-    `SELECT ${parts.join('.')} FROM ${objectType} WHERE Id = '${recordId}' LIMIT 1`,
-  );
-  const rec = res.records[0];
-  if (!rec) return null;
-  let cur: unknown = rec;
-  for (const part of parts) {
-    if (cur && typeof cur === 'object') cur = (cur as Record<string, unknown>)[part];
-    else return null;
-  }
-  return typeof cur === 'string' && cur ? cur : null;
-}
 
 function evalCondition(expr: string): boolean {
   // Very narrow evaluator — supports `<lhs> <op> <rhs>` only.

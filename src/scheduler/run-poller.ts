@@ -74,19 +74,13 @@ async function resumeOne(run: AgentRun, decision: 'approved' | 'rejected' | unde
   }).catch((err) => logger.error({ err, runId: run.id }, 'run_poller_platform_event_failed'));
 }
 
+/**
+ * Archon's own "give up waiting" safety valve — unrelated to how a real
+ * decision is discovered (see routes/webhooks.routes.ts). This only stops
+ * the FLOW from waiting forever; the native Approval Process instance
+ * itself is left alone in Salesforce, since cancelling it isn't this
+ * server's call to make.
+ */
 async function autoRejectOverdue(run: AgentRun): Promise<void> {
   await resumeOne(run, 'rejected');
-  if (!run.approvalToken) return;
-  try {
-    const conn = await getOrgConnection(run.orgId);
-    const existing = await conn.query<{ Id: string }>(
-      `SELECT Id FROM AgentApproval__c WHERE ApprovalToken__c = '${run.approvalToken.replace(/'/g, "\\'")}' LIMIT 1`,
-    );
-    const rec = existing.records[0];
-    if (rec) {
-      await conn.sobject('AgentApproval__c').update({ Id: rec.Id, Status__c: 'TimedOut', DecidedAt__c: new Date().toISOString() });
-    }
-  } catch (err) {
-    logger.error({ err, runId: run.id }, 'run_poller_timeout_status_update_failed');
-  }
 }

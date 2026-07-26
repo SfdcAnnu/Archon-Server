@@ -55,6 +55,10 @@ export const config = {
     clientSecret: optional('SF_CLIENT_SECRET'),
     callbackEvent: optional('SF_CALLBACK_PLATFORM_EVENT', 'AgentExecutionResult__e'),
 
+    // Basic Auth password the Approval-decision Outbound Messages must send.
+    // Must match SynapseConfig__mdt.Default.OutboundWebhookSecret__c.
+    outboundWebhookSecret: optional('OUTBOUND_WEBHOOK_SECRET'),
+
     // OAuth secrets for the Salesforce MCP connector (External Client App).
     // Use the SAME consumer key/secret your standalone MCP server uses, so
     // tokens it produces are accepted by SF for either caller.
