@@ -29,11 +29,11 @@ export interface ConnectorInput {
 }
 
 export interface EngineOverrideInput {
-  engineType?:   string;
-  apiKey?:       string;
-  endpoint?:     string;
-  defaultModel?: string;
-  connectionId?: string;
+  engineType?:   string | null;
+  apiKey?:       string | null;
+  endpoint?:     string | null;
+  defaultModel?: string | null;
+  connectionId?: string | null;
 }
 
 export interface ChatTurnRequest {

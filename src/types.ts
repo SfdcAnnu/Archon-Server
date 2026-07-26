@@ -11,11 +11,11 @@ export type RunMode = 'sync' | 'async';
  *  (rather than imported) to avoid a circular dependency, since that file
  *  imports AgentDefinition FROM this one. */
 export interface EngineOverrideInput {
-  engineType?:   string;
-  apiKey?:       string;
-  endpoint?:     string;
-  defaultModel?: string;
-  connectionId?: string;
+  engineType?:   string | null;
+  apiKey?:       string | null;
+  endpoint?:     string | null;
+  defaultModel?: string | null;
+  connectionId?: string | null;
 }
 
 export interface AgentExecuteRequest {

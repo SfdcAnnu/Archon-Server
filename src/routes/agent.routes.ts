@@ -30,11 +30,11 @@ const executeSchema = z.object({
   // Running user's AI Engine Connection key, resolved by Apex — same
   // per-request credential pattern chat already uses.
   engineOverride: z.object({
-    engineType:   z.string().optional(),
-    apiKey:       z.string().optional(),
-    endpoint:     z.string().optional(),
-    defaultModel: z.string().optional(),
-    connectionId: z.string().optional(),
+    engineType:   z.string().nullish(),
+    apiKey:       z.string().nullish(),
+    endpoint:     z.string().nullish(),
+    defaultModel: z.string().nullish(),
+    connectionId: z.string().nullish(),
   }).optional(),
   isTestRun: z.boolean().optional().default(false),
 });

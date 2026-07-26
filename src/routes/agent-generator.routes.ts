@@ -17,11 +17,11 @@ const requestSchema = z.object({
   fileBase64: z.string().optional(),
   qaHistory: z.array(z.object({ question: z.string(), answer: z.string() })).default([]),
   engineOverride: z.object({
-    engineType:   z.string().optional(),
-    apiKey:       z.string().optional(),
-    endpoint:     z.string().optional(),
-    defaultModel: z.string().optional(),
-    connectionId: z.string().optional(),
+    engineType:   z.string().nullish(),
+    apiKey:       z.string().nullish(),
+    endpoint:     z.string().nullish(),
+    defaultModel: z.string().nullish(),
+    connectionId: z.string().nullish(),
   }).optional(),
 });
 

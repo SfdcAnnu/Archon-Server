@@ -39,11 +39,11 @@ const turnSchema = z.object({
     fileExtension:     z.string().optional(),
   })).optional(),
   engineOverride: z.object({
-    engineType:   z.string().optional(),
-    apiKey:       z.string().optional(),
-    endpoint:     z.string().optional(),
-    defaultModel: z.string().optional(),
-    connectionId: z.string().optional(),
+    engineType:   z.string().nullish(),
+    apiKey:       z.string().nullish(),
+    endpoint:     z.string().nullish(),
+    defaultModel: z.string().nullish(),
+    connectionId: z.string().nullish(),
   }).optional(),
   connectors: z.array(z.object({
     provider:     z.string().min(1),
