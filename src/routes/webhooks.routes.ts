@@ -8,13 +8,18 @@
  * (ArchonApprovalApproved / ArchonApprovalRejected), one per URL below, so
  * the decision is encoded in which endpoint fired rather than the payload.
  *
- * Outbound Messages can't send Archon's own bearer session token, so this
- * route uses Basic Auth against a shared secret instead of `sessionAuth`
- * (see config.salesforce.outboundWebhookSecret / SynapseConfig__mdt).
+ * Authenticity: no separately-managed secret. The Outbound Message has
+ * "Include Salesforce Session Id" enabled, so the SOAP payload carries a
+ * REAL, currently-live Salesforce session — same kind of token as an
+ * OAuth access token. We verify it by making one cheap authenticated
+ * callout back to that same org with it as a Bearer token; only a
+ * genuinely valid, current session passes. The actual resume afterward
+ * still goes through Archon's own stored per-org connection
+ * (getOrgConnection), not this transient session — this is purely proof
+ * the notification really came from this org.
  */
 import express, { Router } from 'express';
 import { parseStringPromise } from 'xml2js';
-import { config } from '../config';
 import { logger } from '../logger';
 import { resumeRunById } from '../orchestrator/engine';
 import { getOrgConnection } from '../salesforce/per-org-connection';
@@ -70,6 +75,18 @@ function findText(obj: unknown, tag: string): string | undefined {
   return undefined;
 }
 
+/** Verify a Session Id is a real, currently-live Salesforce session by using it against the same org. */
+async function isLiveSession(sessionId: string, instanceBaseUrl: string): Promise<boolean> {
+  try {
+    const res = await fetch(`${instanceBaseUrl}/services/data/v62.0/limits`, {
+      headers: { Authorization: `Bearer ${sessionId}` },
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
 webhooksRouter.post(
   '/api/webhooks/approval-decision/:decision',
   // Outbound Messages send text/xml — the app-level express.json() body
@@ -84,20 +101,16 @@ webhooksRouter.post(
       return;
     }
 
-    const auth = req.header('authorization') ?? '';
-    const expected = config.salesforce.outboundWebhookSecret;
-    if (!expected || !isValidBasicAuth(auth, expected)) {
-      logger.warn({ decision }, 'approval_webhook_unauthorized');
-      res.status(401).end();
-      return;
-    }
-
     let orgId: string | undefined;
     let recordId: string | undefined;
+    let sessionId: string | undefined;
+    let enterpriseUrl: string | undefined;
     try {
       const xml = Buffer.isBuffer(req.body) ? req.body.toString('utf8') : String(req.body ?? '');
       const parsed = await parseStringPromise(xml, { explicitArray: true });
       orgId = findText(parsed, 'OrganizationId');
+      sessionId = findText(parsed, 'SessionId');
+      enterpriseUrl = findText(parsed, 'EnterpriseUrl') ?? findText(parsed, 'PartnerUrl');
       // The Notification's own Id is a different thing (the notification event's
       // id) — the record under approval is nested one level deeper, inside sObject.
       const sObjectNode = findNode(parsed, 'sObject');
@@ -108,9 +121,16 @@ webhooksRouter.post(
       return;
     }
 
-    if (!orgId || !recordId) {
-      logger.warn({ orgId, recordId, decision }, 'approval_webhook_missing_fields');
+    if (!orgId || !recordId || !sessionId || !enterpriseUrl) {
+      logger.warn({ orgId, recordId, hasSessionId: !!sessionId, decision }, 'approval_webhook_missing_fields');
       sendAck(res);
+      return;
+    }
+
+    const instanceBaseUrl = enterpriseUrl.split('/services/')[0];
+    if (!(await isLiveSession(sessionId, instanceBaseUrl))) {
+      logger.warn({ orgId, decision }, 'approval_webhook_session_invalid');
+      res.status(401).end();
       return;
     }
 
@@ -139,14 +159,3 @@ webhooksRouter.post(
     sendAck(res);
   },
 );
-
-function isValidBasicAuth(header: string, expectedPassword: string): boolean {
-  if (!header.startsWith('Basic ')) return false;
-  try {
-    const decoded = Buffer.from(header.slice('Basic '.length), 'base64').toString('utf8');
-    const password = decoded.includes(':') ? decoded.slice(decoded.indexOf(':') + 1) : decoded;
-    return password === expectedPassword;
-  } catch {
-    return false;
-  }
-}
