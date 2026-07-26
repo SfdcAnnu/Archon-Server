@@ -178,22 +178,45 @@ async function resolveApprover(ctx: ExecutionContext, approverField: string): Pr
   const safeField = approverField.replace(/[^a-zA-Z0-9_.]/g, '');
   if (!safeField) return null;
   const safeRecordId = ctx.recordId.replace(/[^a-zA-Z0-9]/g, '');
+  const parts = safeField.split('.');
 
   try {
-    const res = await ctx.conn.query<Record<string, unknown>>(
-      `SELECT ${safeField} FROM ${objectType} WHERE Id = '${safeRecordId}' LIMIT 1`,
-    );
-    const rec = res.records[0];
-    if (!rec) return null;
-    let cur: unknown = rec;
-    for (const part of safeField.split('.')) {
-      if (cur && typeof cur === 'object') cur = (cur as Record<string, unknown>)[part];
-      else return null;
+    // "Owner.X" is the common case for approval routing, but Owner is a
+    // polymorphic relationship on Lead/Case/Task (a User OR a Queue) —
+    // Salesforce's query API resolves dot-traversal on it through a generic
+    // interface that only exposes fields common to every possible type, so
+    // `SELECT Owner.ManagerId` fails with INVALID_FIELD even when the owner
+    // genuinely is a User with a manager. Resolve OwnerId first, then query
+    // User directly for the rest of the path — also naturally (and
+    // correctly) yields "no approver" when a Queue owns the record.
+    if (parts[0] === 'Owner' && parts.length > 1) {
+      const ownerRes = await ctx.conn.query<{ OwnerId?: string }>(
+        `SELECT OwnerId FROM ${objectType} WHERE Id = '${safeRecordId}' LIMIT 1`,
+      );
+      const ownerId = ownerRes.records[0]?.OwnerId;
+      if (!ownerId || !ownerId.startsWith('005')) return null; // Queue-owned or missing
+      return resolveDotPath(ctx, 'User', ownerId, parts.slice(1));
     }
-    return typeof cur === 'string' && cur ? cur : null;
+    return resolveDotPath(ctx, objectType, safeRecordId, parts);
   } catch {
     return null;
   }
+}
+
+async function resolveDotPath(
+  ctx: ExecutionContext, objectType: string, recordId: string, parts: string[],
+): Promise<string | null> {
+  const res = await ctx.conn.query<Record<string, unknown>>(
+    `SELECT ${parts.join('.')} FROM ${objectType} WHERE Id = '${recordId}' LIMIT 1`,
+  );
+  const rec = res.records[0];
+  if (!rec) return null;
+  let cur: unknown = rec;
+  for (const part of parts) {
+    if (cur && typeof cur === 'object') cur = (cur as Record<string, unknown>)[part];
+    else return null;
+  }
+  return typeof cur === 'string' && cur ? cur : null;
 }
 
 function evalCondition(expr: string): boolean {
