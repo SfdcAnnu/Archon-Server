@@ -6,14 +6,33 @@
  * with the org's own connection).
  */
 import type { Connection } from 'jsforce';
-import type { AgentDefinition } from '../../types';
+import type { AgentDefinition, AgentNode } from '../../types';
 import type { ConnectorInput } from './types';
 
+/**
+ * Scoped to ONE AI node's own downstream catalogs — NOT every catalog node
+ * in the agent. A flow can have several AI nodes, each wired to a different
+ * catalog (same connector, different allowedTools per node — the whole
+ * point of the per-node tool-scoping feature). Aggregating agent-wide would
+ * silently union every node's tools into every other node's call.
+ */
 export async function buildConnectorInputsFromAgent(
   agent: AgentDefinition,
+  aiNode: AgentNode,
   conn: Connection,
 ): Promise<ConnectorInput[]> {
-  const catalogNodes = agent.nodes.filter(n => n.nodeType === 'catalog' && n.isEnabled);
+  const canvas = agent.canvasJson as { connections?: Array<{ fromIndex?: number; toIndex?: number }> } | undefined;
+  const connections = canvas?.connections ?? [];
+
+  const catalogNodes = agent.nodes.filter(n =>
+    n.nodeType === 'catalog' &&
+    n.isEnabled &&
+    connections.some(c => {
+      const from = agent.nodes[c.fromIndex ?? -1]?.id;
+      const to   = agent.nodes[c.toIndex   ?? -1]?.id;
+      return from === aiNode.id && to === n.id;
+    }),
+  );
   if (catalogNodes.length === 0) return [];
 
   const res = await conn.query<{ DeveloperName: string; McpServerUrl__c?: string }>(

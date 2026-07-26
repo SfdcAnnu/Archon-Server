@@ -23,7 +23,7 @@ export async function runHeadlessAiStep(
   ctx: ExecutionContext,
   aiNode: AgentNode,
 ): Promise<ChatTurnResult> {
-  const connectors = await buildConnectorInputsFromAgent(ctx.agent, ctx.conn);
+  const connectors = await buildConnectorInputsFromAgent(ctx.agent, aiNode, ctx.conn);
 
   const config = (aiNode.config as { instruction?: string }) ?? {};
   const instruction = ctx.interpolate(config.instruction || '').trim();

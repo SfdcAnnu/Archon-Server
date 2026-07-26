@@ -58,6 +58,14 @@ export interface ToolCallSummary {
   input:   Record<string, unknown>;
   output?: unknown;
   isError?: boolean;
+  serverName?: string; // which connector/MCP server this call went through
+}
+
+/** A tool call the model made outside its connector's configured allowedTools. */
+export interface PolicyViolation {
+  serverName:   string;
+  tool:         string;
+  allowedTools: string[];
 }
 
 export interface ChatTurnResult {
@@ -67,4 +75,9 @@ export interface ChatTurnResult {
   modelUsed: string;
   tokensIn: number;
   tokensOut: number;
+  // Only ever populated for adapters that can't hard-block tool calls
+  // (Claude's Managed MCP today — see claude.ts). Empty/undefined means
+  // either no restriction was configured, or the provider enforces it
+  // server-side already (OpenAI).
+  policyViolations?: PolicyViolation[];
 }

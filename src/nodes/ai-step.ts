@@ -18,6 +18,20 @@ const aiStepExec = (subType: 'claude' | 'gpt4'): NodeExecutor => async (node, ct
     const result = await runHeadlessAiStep(ctx, node);
     const { score, priority, cleanText } = parseScoreTail(result.assistantText);
 
+    if (result.policyViolations && result.policyViolations.length > 0) {
+      const detail = result.policyViolations
+        .map(v => `"${v.tool}" (${v.serverName} only allows: ${v.allowedTools.join(', ')})`)
+        .join('; ');
+      logger.error({ nodeId: node.id, subType, orgId: ctx.orgId, policyViolations: result.policyViolations }, 'flow_ai_step_policy_violation');
+      return {
+        nodeId: node.id,
+        nodeSubType: subType,
+        success: false,
+        error: `Policy violation: the model called a tool outside this node's allowed list — ${detail}`,
+        output: { finalText: cleanText, score, priority, toolCalls: result.toolCalls, policyViolations: result.policyViolations },
+      };
+    }
+
     logger.info({
       nodeId: node.id, subType, orgId: ctx.orgId,
       toolCallCount: result.toolCalls.length, modelUsed: result.modelUsed,

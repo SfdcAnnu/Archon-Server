@@ -23,6 +23,7 @@ import type {
   ChatTurnRequest,
   ChatTurnResult,
   ToolCallSummary,
+  PolicyViolation,
 } from './types';
 
 const ANTHROPIC_URL     = 'https://api.anthropic.com/v1/messages';
@@ -169,7 +170,26 @@ export async function runClaudeAdapter(
       input: use.input ?? {},
       output: resultText,
       isError: result?.is_error ?? false,
+      serverName: use.server_name ?? undefined,
     });
+  }
+
+  // Can't stop these calls before they happen (Anthropic's servers already
+  // executed them against the remote MCP server by the time we see this
+  // response — see the comment above on why we can't send a hard filter).
+  // What we CAN do is refuse to treat an out-of-policy result as good data:
+  // detect the violation and let the node executor fail loudly instead of
+  // silently succeeding on a response the model wasn't supposed to produce.
+  const policyViolations: PolicyViolation[] = [];
+  for (const call of toolCalls) {
+    const server = servers.find(s => s.name === call.serverName);
+    if (!server || server.allowedTools.length === 0) continue;
+    if (!server.allowedTools.includes(call.name)) {
+      policyViolations.push({ serverName: server.name, tool: call.name, allowedTools: server.allowedTools });
+    }
+  }
+  if (policyViolations.length > 0) {
+    logger.error({ orgId: req.context.orgId, policyViolations }, 'claude_adapter_policy_violation');
   }
 
   return {
@@ -179,6 +199,7 @@ export async function runClaudeAdapter(
     modelUsed: model,
     tokensIn:  json.usage?.input_tokens ?? 0,
     tokensOut: json.usage?.output_tokens ?? 0,
+    policyViolations: policyViolations.length > 0 ? policyViolations : undefined,
   };
 }
 
