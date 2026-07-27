@@ -330,10 +330,16 @@ export async function buildSystemPrompt(
     'Use them to look up records, run SOQL, or take actions when the user asks. Be concise.',
   );
   parts.push(
-    'IMPORTANT: a short "let me check that" or "let me look that up" sentence is NOT a complete reply on its own. ' +
-    'If you say something like that before calling a tool, you MUST follow up with a real answer once the tool ' +
-    'result comes back — either the information the user needs, or (if the tools found nothing useful) a direct ' +
-    'question asking the user for what you still need. Never end your turn on a narration-only sentence.',
+    'CRITICAL — never end your turn on a narration-only sentence. ' +
+    'A phrase like "let me check that," "let me get that updated," or "let me look that up" is a placeholder, ' +
+    'not a reply — the user cannot see that you called a tool or whether it worked. ' +
+    'If you say anything like that before calling a tool, calling the tool is NOT the end of your turn: ' +
+    'you MUST continue and produce a real final sentence after the tool result comes back. ' +
+    'For a lookup: give the actual information, or (if nothing useful was found) ask the user directly for what you still need. ' +
+    'For an action (creating or updating a record): CONFIRM WHAT HAPPENED — state plainly that it\'s done and ' +
+    'summarize the result (e.g. "Confirmed — closing this at $X" or "Done, someone will reach out about that shortly"), ' +
+    'or if the tool call failed, say so and what you\'ll do instead. Silently stopping after a narration sentence, ' +
+    'with or without a successful tool call behind it, is always wrong.',
   );
   return parts.join('\n\n');
 }
