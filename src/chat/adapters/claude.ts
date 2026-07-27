@@ -163,11 +163,13 @@ export async function runClaudeAdapter(
   }, 'claude_adapter_response');
 
   // Extract final assistant text + tool call summaries
-  const assistantText = (json.content ?? [])
+  let assistantText = (json.content ?? [])
     .filter(b => b.type === 'text' && typeof b.text === 'string')
     .map(b => b.text)
     .join('\n')
     .trim();
+  // TEMP DIAGNOSTIC
+  assistantText += ` [DEBUG endsWithText=${endsWithText} origLen=${content.length} finalLen=${(json.content ?? []).length} types=${(json.content ?? []).map(b=>b.type).join(',')}]`;
 
   const toolCalls: ToolCallSummary[] = [];
   const toolUses    = (json.content ?? []).filter(b => b.type === 'mcp_tool_use');
