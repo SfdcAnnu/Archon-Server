@@ -106,11 +106,10 @@ export async function runClaudeAdapter(
     }, 'claude_adapter_allowed_tools_soft_enforced');
   }
 
-  const body = {
+  const baseBody = {
     model,
     max_tokens: 8_000,
     system:     systemPrompt + restrictionPrompt,
-    messages,
     mcp_servers: mcpServers,
     tools:       toolsets,
   };
@@ -124,27 +123,42 @@ export async function runClaudeAdapter(
   }, 'claude_adapter_request');
 
   const t0 = Date.now();
-  const res = await fetch(ANTHROPIC_URL, {
-    method: 'POST',
-    headers: {
-      'Content-Type':      'application/json',
-      'x-api-key':         apiKey,
-      'anthropic-version': ANTHROPIC_VERSION,
-      'anthropic-beta':    ANTHROPIC_BETA,
-    },
-    body: JSON.stringify(body),
-  });
-  const json = (await res.json()) as AnthropicResponse;
+  let json = await callAnthropic(baseBody, messages, apiKey);
+  let tokensIn  = json.usage?.input_tokens  ?? 0;
+  let tokensOut = json.usage?.output_tokens ?? 0;
 
-  if (!res.ok || json.error) {
-    logger.error({ status: res.status, err: json.error }, 'claude_adapter_error');
-    throw new Error(json.error?.message ?? `Anthropic API error ${res.status}`);
+  // Structural (not heuristic) narration-only guard: if the response's last
+  // content block isn't text, the model stopped mid-tool-use and never gave
+  // a real closing reply — the system-prompt instruction reduces this but
+  // doesn't eliminate it (confirmed live). One bounded continuation call
+  // forces a real final answer instead of shipping "let me check that" to
+  // the user.
+  const content = json.content ?? [];
+  const endsWithText = content.length > 0 && content[content.length - 1]?.type === 'text';
+  if (content.length > 0 && !endsWithText) {
+    logger.warn({ orgId: req.context.orgId }, 'claude_adapter_narration_only_continuation');
+    const continuationMessages = [
+      ...messages,
+      { role: 'assistant' as const, content },
+      { role: 'user' as const, content: 'Continue — that was not a complete reply, the customer cannot see it. Finish responding now with a real answer based on what you just found or did.' },
+    ];
+    const json2 = await callAnthropic(baseBody, continuationMessages, apiKey);
+    tokensIn  += json2.usage?.input_tokens  ?? 0;
+    tokensOut += json2.usage?.output_tokens ?? 0;
+    // Merge: keep the original narration + tool calls for the transcript,
+    // but the continuation's content is what actually has the closing text.
+    json = { ...json2, content: [...content, ...(json2.content ?? [])] };
+  }
+
+  if (json.error) {
+    logger.error({ err: json.error }, 'claude_adapter_error');
+    throw new Error(json.error.message ?? 'Anthropic API error');
   }
 
   logger.info({
     orgId: req.context.orgId,
-    tokensIn: json.usage?.input_tokens,
-    tokensOut: json.usage?.output_tokens,
+    tokensIn,
+    tokensOut,
     ms: Date.now() - t0,
   }, 'claude_adapter_response');
 
@@ -197,10 +211,32 @@ export async function runClaudeAdapter(
     assistantText,
     toolCalls,
     modelUsed: model,
-    tokensIn:  json.usage?.input_tokens ?? 0,
-    tokensOut: json.usage?.output_tokens ?? 0,
+    tokensIn,
+    tokensOut,
     policyViolations: policyViolations.length > 0 ? policyViolations : undefined,
   };
+}
+
+async function callAnthropic(
+  baseBody: Record<string, unknown>,
+  messages: Array<{ role: string; content: unknown }>,
+  apiKey: string,
+): Promise<AnthropicResponse> {
+  const res = await fetch(ANTHROPIC_URL, {
+    method: 'POST',
+    headers: {
+      'Content-Type':      'application/json',
+      'x-api-key':         apiKey,
+      'anthropic-version': ANTHROPIC_VERSION,
+      'anthropic-beta':    ANTHROPIC_BETA,
+    },
+    body: JSON.stringify({ ...baseBody, messages }),
+  });
+  const json = (await res.json()) as AnthropicResponse;
+  if (!res.ok && !json.error) {
+    throw new Error(`Anthropic API error ${res.status}`);
+  }
+  return json;
 }
 
 /** Convert our history + new user message (+ attachments) to Anthropic's messages array. */
