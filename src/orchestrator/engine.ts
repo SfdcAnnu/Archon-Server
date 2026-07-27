@@ -60,6 +60,11 @@ export async function runAgent(args: {
     aliases: ctx.serializeAliases(),
     frontier: [trigger.id],
     visited: [],
+    // Without this, a resumed run always rebuilds its ExecutionContext with
+    // engineOverride: undefined (see resumeRunById below) — any AI node
+    // that only ever executes AFTER a pause/resume would silently lose the
+    // credential the run started with, even though one was resolved fine.
+    engineOverrideJson: request.engineOverride,
   });
   ctx.runId = run.id;
 
