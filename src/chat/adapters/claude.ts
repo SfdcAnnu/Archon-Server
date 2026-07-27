@@ -134,7 +134,9 @@ export async function runClaudeAdapter(
   // forces a real final answer instead of shipping "let me check that" to
   // the user.
   const content = json.content ?? [];
-  const endsWithText = content.length > 0 && content[content.length - 1]?.type === 'text';
+  const lastBlock = content[content.length - 1];
+  const endsWithText = content.length > 0 && lastBlock?.type === 'text' &&
+    typeof lastBlock.text === 'string' && lastBlock.text.trim().length > 0;
   let debugTag = '';
   if (content.length > 0 && !endsWithText) {
     logger.warn({ orgId: req.context.orgId }, 'claude_adapter_narration_only_continuation');
