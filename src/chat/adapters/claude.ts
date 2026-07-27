@@ -149,11 +149,17 @@ export async function runClaudeAdapter(
   }, 'claude_adapter_response');
 
   // Extract final assistant text + tool call summaries
-  const assistantText = (json.content ?? [])
+  let assistantText = (json.content ?? [])
     .filter(b => b.type === 'text' && typeof b.text === 'string')
     .map(b => b.text)
     .join('\n')
     .trim();
+
+  // TEMP DIAGNOSTIC — investigating why assistantText looks truncated after
+  // tool calls. No Render log access from this session, so surface it
+  // inline instead. Remove after root-causing.
+  const __debugBlockTypes = (json.content ?? []).map(b => b.type).join(',');
+  assistantText += `\n\n[DEBUG stop_reason=${json.stop_reason} blocks=${__debugBlockTypes}]`;
 
   const toolCalls: ToolCallSummary[] = [];
   const toolUses    = (json.content ?? []).filter(b => b.type === 'mcp_tool_use');
