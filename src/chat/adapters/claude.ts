@@ -148,18 +148,9 @@ export async function runClaudeAdapter(
     ms: Date.now() - t0,
   }, 'claude_adapter_response');
 
-  // Extract final assistant text + tool call summaries
-  let assistantText = (json.content ?? [])
-    .filter(b => b.type === 'text' && typeof b.text === 'string')
-    .map(b => b.text)
-    .join('\n')
-    .trim();
-
-  // TEMP DIAGNOSTIC — investigating why assistantText looks truncated after
-  // tool calls. No Render log access from this session, so surface it
-  // inline instead. Remove after root-causing.
-  const __debugBlockTypes = (json.content ?? []).map(b => b.type).join(',');
-  assistantText += `\n\n[DEBUG stop_reason=${json.stop_reason} blocks=${__debugBlockTypes}]`;
+  // TEMP DIAGNOSTIC — deploy canary. If this literal string doesn't show up
+  // in the next chat turn, the deployed instance is not running this commit.
+  let assistantText = `CANARY_9f31b2 stop_reason=${json.stop_reason} raw=${JSON.stringify(json.content ?? [])}`;
 
   const toolCalls: ToolCallSummary[] = [];
   const toolUses    = (json.content ?? []).filter(b => b.type === 'mcp_tool_use');
