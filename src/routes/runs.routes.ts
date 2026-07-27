@@ -57,8 +57,14 @@ runsRouter.get('/api/agent/runs/by-correlation/:correlationId/steps', sessionAut
 const resumeSchema = z.object({
   runId: z.string().min(1).optional(),
   approvalToken: z.string().min(1).optional(),
+  // Generic hook for a customer's OWN automation (their own Flow/Trigger/
+  // Apex reacting to their own Approval Process's outcome however they've
+  // set it up) — Archon only submits records for approval, it doesn't ship
+  // any decision-detection mechanism of its own. Looking up by record id is
+  // the easiest key for someone else's automation to have on hand.
+  recordId: z.string().min(1).optional(),
   decision: z.enum(['approved', 'rejected']).optional(),
-}).refine((d) => !!d.runId || !!d.approvalToken, { message: 'runId or approvalToken required' });
+}).refine((d) => !!d.runId || !!d.approvalToken || !!d.recordId, { message: 'runId, approvalToken, or recordId required' });
 
 runsRouter.post('/api/agent/runs/resume', sessionAuth, async (req, res) => {
   const orgId = req.orgId!;
@@ -67,13 +73,21 @@ runsRouter.post('/api/agent/runs/resume', sessionAuth, async (req, res) => {
     res.status(400).json({ error: 'invalid_request', details: parsed.error.flatten() });
     return;
   }
-  const { approvalToken, decision } = parsed.data;
+  const { approvalToken, recordId, decision } = parsed.data;
 
   try {
     let runId = parsed.data.runId;
     if (!runId && approvalToken) {
       const run = await RunsRepo.getByApprovalToken(approvalToken);
       if (!run || run.orgId !== orgId) {
+        res.status(404).json({ error: 'run_not_found' });
+        return;
+      }
+      runId = run.id;
+    }
+    if (!runId && recordId) {
+      const run = await RunsRepo.getPendingApprovalByRecord(orgId, recordId);
+      if (!run) {
         res.status(404).json({ error: 'run_not_found' });
         return;
       }

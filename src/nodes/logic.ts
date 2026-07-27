@@ -130,13 +130,15 @@ register('loop', async (node) => ({
  * (email, mobile, Chatter, Home page "Items to Approve") — no custom
  * approver-resolution or approval object of our own.
  *
- * Resume path: the admin adds two packaged Outbound Messages as this
- * Approval Process's Final Approval/Rejection Actions, pointing at
- * POST /api/webhooks/approval-decision/{approved|rejected} on this server.
- * The webhook resumes the paused run by orgId + recordId (see
- * routes/webhooks.routes.ts). The poller's timeoutHours sweep is a
- * separate "give up waiting" safety valve, unrelated to how the real
- * decision is discovered.
+ * Archon deliberately stops at Submit — it ships no decision-detection
+ * mechanism of its own (no webhook, no polling). Resuming the paused run
+ * is the customer's own call: their own automation (built however they
+ * like, reacting to their own Approval Process's outcome however they've
+ * configured it) can hit the existing generic resume endpoint,
+ * POST /api/agent/runs/resume, with { recordId, decision } — no
+ * Archon-specific setup required on their end beyond that one call. If
+ * nothing ever calls it, timeoutHours below is the only guaranteed way the
+ * run stops waiting (auto-rejects — see scheduler/run-poller.ts).
  */
 interface ApprovalSubmitResult {
   instanceId?: string;

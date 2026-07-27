@@ -11,7 +11,6 @@ import { engineRouter } from './routes/engine.routes';
 import { kbRouter } from './routes/kb.routes';
 import { runsRouter } from './routes/runs.routes';
 import { agentGeneratorRouter } from './routes/agent-generator.routes';
-import { webhooksRouter } from './routes/webhooks.routes';
 import { startRunPoller } from './scheduler/run-poller';
 
 function buildApp(): express.Express {
@@ -29,7 +28,6 @@ function buildApp(): express.Express {
   app.use(kbRouter);         // /api/kb/* — sessionAuth-guarded
   app.use(runsRouter);       // /api/agent/runs/resume — sessionAuth-guarded
   app.use(agentGeneratorRouter); // /api/agent/generate — sessionAuth-guarded
-  app.use(webhooksRouter);   // /api/webhooks/* — Basic Auth (Outbound Message), not sessionAuth
 
   // Final error handler
   app.use((err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
