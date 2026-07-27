@@ -135,6 +135,7 @@ export async function runClaudeAdapter(
   // the user.
   const content = json.content ?? [];
   const endsWithText = content.length > 0 && content[content.length - 1]?.type === 'text';
+  let debugTag = '';
   if (content.length > 0 && !endsWithText) {
     logger.warn({ orgId: req.context.orgId }, 'claude_adapter_narration_only_continuation');
     const continuationMessages = [
@@ -145,6 +146,7 @@ export async function runClaudeAdapter(
     const json2 = await callAnthropic(baseBody, continuationMessages, apiKey);
     tokensIn  += json2.usage?.input_tokens  ?? 0;
     tokensOut += json2.usage?.output_tokens ?? 0;
+    debugTag = ` [DEBUG2 json2Error=${JSON.stringify(json2.error)} json2Types=${(json2.content ?? []).map(b=>b.type).join(',')} json2Stop=${json2.stop_reason}]`;
     // Merge: keep the original narration + tool calls for the transcript,
     // but the continuation's content is what actually has the closing text.
     json = { ...json2, content: [...content, ...(json2.content ?? [])] };
@@ -167,7 +169,7 @@ export async function runClaudeAdapter(
     .filter(b => b.type === 'text' && typeof b.text === 'string')
     .map(b => b.text)
     .join('\n')
-    .trim();
+    .trim() + debugTag;
 
   const toolCalls: ToolCallSummary[] = [];
   const toolUses    = (json.content ?? []).filter(b => b.type === 'mcp_tool_use');
