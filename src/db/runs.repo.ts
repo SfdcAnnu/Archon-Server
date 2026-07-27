@@ -45,16 +45,17 @@ export const RunsRepo = {
   },
 
   /**
-   * Looked up by the Outbound Message webhook — a record can only have one
-   * pending approval instance (and one paused run) at a time. Matches on the
-   * first 15 chars of orgId: Outbound Message notifications carry the
-   * 15-char OrganizationId, while our own stored orgId is the 18-char form
-   * from the identity URL — the first 15 chars are always the same org
-   * either way, so this is safe regardless of which length either side is.
+   * The generic "resume by record" lookup — the hook a customer's own
+   * automation calls after their Approval Process decides something. In
+   * ordinary use a record only ever has one pending approval (and one
+   * paused run) at a time; ordered by most-recently-paused first purely as
+   * a sane tie-break if old/abandoned test runs ever leave more than one
+   * behind.
    */
   async getPendingApprovalByRecord(orgId: string, recordId: string): Promise<AgentRun | null> {
     return prisma.agentRun.findFirst({
-      where: { orgId: { startsWith: orgId.slice(0, 15) }, recordId, status: 'WAITING_APPROVAL' },
+      where: { orgId, recordId, status: 'WAITING_APPROVAL' },
+      orderBy: { updatedAt: 'desc' },
     });
   },
 
