@@ -86,12 +86,7 @@ export async function runOpenAiAdapter(
     return mcpTool;
   });
 
-  const body = {
-    model,
-    input,
-    tools,
-    max_output_tokens: 8_000,
-  };
+  const baseBody = { model, tools, max_output_tokens: 8_000 };
 
   logger.info({
     orgId: req.context.orgId,
@@ -102,25 +97,50 @@ export async function runOpenAiAdapter(
   }, 'openai_adapter_request');
 
   const t0 = Date.now();
-  const res = await fetch(OPENAI_URL, {
-    method: 'POST',
-    headers: {
-      'Content-Type':  'application/json',
-      Authorization:   'Bearer ' + apiKey,
-    },
-    body: JSON.stringify(body),
-  });
-  const json = (await res.json()) as OpenAiResponsesResult;
+  let json = await callOpenAi({ ...baseBody, input }, apiKey);
+  let tokensIn  = json.usage?.input_tokens  ?? 0;
+  let tokensOut = json.usage?.output_tokens ?? 0;
 
-  if (!res.ok || json.error) {
-    logger.error({ status: res.status, err: json.error }, 'openai_adapter_error');
-    throw new Error(json.error?.message ?? `OpenAI API error ${res.status}`);
+  // Structural (not heuristic) narration-only guard — same issue confirmed
+  // in the Claude adapter: if the response doesn't end in a real assistant
+  // message, the model stopped mid-tool-use without ever replying to the
+  // customer. One bounded continuation forces a real final answer, using
+  // the Responses API's own previous_response_id continuation instead of
+  // manually replaying the conversation.
+  const output = json.output ?? [];
+  const lastItem = output[output.length - 1];
+  const lastText = lastItem?.type === 'message' && Array.isArray(lastItem.content)
+    ? lastItem.content.map(c => c.text ?? '').join('').trim()
+    : '';
+  const endsWithText = output.length > 0 && lastItem?.type === 'message' && lastText.length > 0;
+
+  if (output.length > 0 && !endsWithText && json.id) {
+    logger.warn({ orgId: req.context.orgId }, 'openai_adapter_narration_only_continuation');
+    const json2 = await callOpenAi({
+      ...baseBody,
+      input: [{
+        role: 'user',
+        content: [{
+          type: 'input_text',
+          text: 'Continue — that was not a complete reply, the customer cannot see it. Finish responding now with a real answer based on what you just found or did.',
+        }],
+      }],
+      previous_response_id: json.id,
+    }, apiKey);
+    tokensIn  += json2.usage?.input_tokens  ?? 0;
+    tokensOut += json2.usage?.output_tokens ?? 0;
+    json = { ...json2, output: [...output, ...(json2.output ?? [])] };
+  }
+
+  if (json.error) {
+    logger.error({ err: json.error }, 'openai_adapter_error');
+    throw new Error(json.error.message ?? 'OpenAI API error');
   }
 
   logger.info({
     orgId: req.context.orgId,
-    tokensIn: json.usage?.input_tokens,
-    tokensOut: json.usage?.output_tokens,
+    tokensIn,
+    tokensOut,
     ms: Date.now() - t0,
   }, 'openai_adapter_response');
 
@@ -160,9 +180,28 @@ export async function runOpenAiAdapter(
     assistantText,
     toolCalls,
     modelUsed: model,
-    tokensIn:  json.usage?.input_tokens ?? 0,
-    tokensOut: json.usage?.output_tokens ?? 0,
+    tokensIn,
+    tokensOut,
   };
+}
+
+async function callOpenAi(
+  body: Record<string, unknown>,
+  apiKey: string,
+): Promise<OpenAiResponsesResult> {
+  const res = await fetch(OPENAI_URL, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization:  'Bearer ' + apiKey,
+    },
+    body: JSON.stringify(body),
+  });
+  const json = (await res.json()) as OpenAiResponsesResult;
+  if (!res.ok && !json.error) {
+    throw new Error(`OpenAI API error ${res.status}`);
+  }
+  return json;
 }
 
 /** Map our history + system prompt + new user message (+ attachments) → OpenAI Responses `input` array. */
