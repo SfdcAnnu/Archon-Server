@@ -162,14 +162,8 @@ export async function runClaudeAdapter(
     ms: Date.now() - t0,
   }, 'claude_adapter_response');
 
-  // Extract final assistant text + tool call summaries
-  let assistantText = (json.content ?? [])
-    .filter(b => b.type === 'text' && typeof b.text === 'string')
-    .map(b => b.text)
-    .join('\n')
-    .trim();
-  // TEMP DIAGNOSTIC
-  assistantText += ` [DEBUG endsWithText=${endsWithText} origLen=${content.length} finalLen=${(json.content ?? []).length} types=${(json.content ?? []).map(b=>b.type).join(',')}]`;
+  // TEMP CANARY — deploy verification.
+  const assistantText = `CANARY_qz88rf endsWithText=${endsWithText} origLen=${content.length} finalLen=${(json.content ?? []).length} types=${(json.content ?? []).map(b=>b.type).join(',')}`;
 
   const toolCalls: ToolCallSummary[] = [];
   const toolUses    = (json.content ?? []).filter(b => b.type === 'mcp_tool_use');
