@@ -329,5 +329,11 @@ export async function buildSystemPrompt(
     'You have access to Salesforce tools through a Model Context Protocol server. ' +
     'Use them to look up records, run SOQL, or take actions when the user asks. Be concise.',
   );
+  parts.push(
+    'IMPORTANT: a short "let me check that" or "let me look that up" sentence is NOT a complete reply on its own. ' +
+    'If you say something like that before calling a tool, you MUST follow up with a real answer once the tool ' +
+    'result comes back — either the information the user needs, or (if the tools found nothing useful) a direct ' +
+    'question asking the user for what you still need. Never end your turn on a narration-only sentence.',
+  );
   return parts.join('\n\n');
 }

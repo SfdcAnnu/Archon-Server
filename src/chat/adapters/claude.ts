@@ -148,9 +148,12 @@ export async function runClaudeAdapter(
     ms: Date.now() - t0,
   }, 'claude_adapter_response');
 
-  // TEMP DIAGNOSTIC — deploy canary. If this literal string doesn't show up
-  // in the next chat turn, the deployed instance is not running this commit.
-  let assistantText = `CANARY_9f31b2 stop_reason=${json.stop_reason} raw=${JSON.stringify(json.content ?? [])}`;
+  // Extract final assistant text + tool call summaries
+  const assistantText = (json.content ?? [])
+    .filter(b => b.type === 'text' && typeof b.text === 'string')
+    .map(b => b.text)
+    .join('\n')
+    .trim();
 
   const toolCalls: ToolCallSummary[] = [];
   const toolUses    = (json.content ?? []).filter(b => b.type === 'mcp_tool_use');
