@@ -96,10 +96,17 @@ export async function runOpenAiAdapter(
     mcpServers: servers.map(s => ({ name: s.name, allowedToolCount: s.allowedTools.length })),
   }, 'openai_adapter_request');
 
+  const debugRequests:  unknown[] = [];
+  const debugResponses: unknown[] = [];
+
   const t0 = Date.now();
   let json = await callOpenAi({ ...baseBody, input }, apiKey);
   let tokensIn  = json.usage?.input_tokens  ?? 0;
   let tokensOut = json.usage?.output_tokens ?? 0;
+  if (req.debugMode) {
+    debugRequests.push(redactDebugRequest({ ...baseBody, input }));
+    debugResponses.push(json);
+  }
 
   // Structural (not heuristic) narration-only guard — same issue confirmed
   // in the Claude adapter: if the response doesn't end in a real assistant
@@ -116,7 +123,7 @@ export async function runOpenAiAdapter(
 
   if (output.length > 0 && !endsWithText && json.id) {
     logger.warn({ orgId: req.context.orgId }, 'openai_adapter_narration_only_continuation');
-    const json2 = await callOpenAi({
+    const continuationBody = {
       ...baseBody,
       input: [{
         role: 'user',
@@ -126,9 +133,14 @@ export async function runOpenAiAdapter(
         }],
       }],
       previous_response_id: json.id,
-    }, apiKey);
+    };
+    const json2 = await callOpenAi(continuationBody, apiKey);
     tokensIn  += json2.usage?.input_tokens  ?? 0;
     tokensOut += json2.usage?.output_tokens ?? 0;
+    if (req.debugMode) {
+      debugRequests.push(redactDebugRequest(continuationBody));
+      debugResponses.push(json2);
+    }
     json = { ...json2, output: [...output, ...(json2.output ?? [])] };
   }
 
@@ -182,6 +194,21 @@ export async function runOpenAiAdapter(
     modelUsed: model,
     tokensIn,
     tokensOut,
+    debugRequest:  req.debugMode ? debugRequests  : undefined,
+    debugResponse: req.debugMode ? debugResponses : undefined,
+  };
+}
+
+/** Debug logging is opt-in per agent, but tools[].headers.Authorization carries
+ *  a live Salesforce access token — never let it land in a readable field. */
+function redactDebugRequest(body: Record<string, unknown>): Record<string, unknown> {
+  const tools = body.tools;
+  if (!Array.isArray(tools)) return body;
+  return {
+    ...body,
+    tools: tools.map(t => (t && typeof t === 'object' && 'headers' in t)
+      ? { ...t, headers: { ...(t as Record<string, unknown>).headers as Record<string, unknown>, Authorization: '[redacted]' } }
+      : t),
   };
 }
 

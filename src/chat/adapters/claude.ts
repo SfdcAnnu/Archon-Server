@@ -122,10 +122,17 @@ export async function runClaudeAdapter(
     mcpServers: servers.map(s => s.name),
   }, 'claude_adapter_request');
 
+  const debugRequests:  unknown[] = [];
+  const debugResponses: unknown[] = [];
+
   const t0 = Date.now();
   let json = await callAnthropic(baseBody, messages, apiKey);
   let tokensIn  = json.usage?.input_tokens  ?? 0;
   let tokensOut = json.usage?.output_tokens ?? 0;
+  if (req.debugMode) {
+    debugRequests.push(redactDebugRequest({ ...baseBody, messages }));
+    debugResponses.push(json);
+  }
 
   // Structural (not heuristic) narration-only guard: if the response's last
   // content block isn't text, the model stopped mid-tool-use and never gave
@@ -147,6 +154,10 @@ export async function runClaudeAdapter(
     const json2 = await callAnthropic(baseBody, continuationMessages, apiKey);
     tokensIn  += json2.usage?.input_tokens  ?? 0;
     tokensOut += json2.usage?.output_tokens ?? 0;
+    if (req.debugMode) {
+      debugRequests.push(redactDebugRequest({ ...baseBody, messages: continuationMessages }));
+      debugResponses.push(json2);
+    }
     // Merge: keep the original narration + tool calls for the transcript,
     // but the continuation's content is what actually has the closing text.
     json = { ...json2, content: [...content, ...(json2.content ?? [])] };
@@ -216,6 +227,19 @@ export async function runClaudeAdapter(
     tokensIn,
     tokensOut,
     policyViolations: policyViolations.length > 0 ? policyViolations : undefined,
+    debugRequest:  req.debugMode ? debugRequests  : undefined,
+    debugResponse: req.debugMode ? debugResponses : undefined,
+  };
+}
+
+/** Debug logging is opt-in per agent, but mcp_servers[].authorization_token is a
+ *  live Salesforce access token — never let it land in a readable field. */
+function redactDebugRequest(body: Record<string, unknown>): Record<string, unknown> {
+  const mcpServers = body.mcp_servers;
+  if (!Array.isArray(mcpServers)) return body;
+  return {
+    ...body,
+    mcp_servers: mcpServers.map(s => ({ ...s, authorization_token: '[redacted]' })),
   };
 }
 

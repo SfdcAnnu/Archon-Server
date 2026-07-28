@@ -49,6 +49,12 @@ export interface ChatTurnRequest {
   /** Set by chat-engine.ts after Topic classification; adapters just thread
    *  it into buildSystemPrompt. Not sent by Apex. */
   activeTopic?: { name: string; instructions: string } | null;
+  /** AgentDefinition__c.DebugMode__c — when true, adapters capture the raw
+   *  request/response JSON for every provider call this turn (see
+   *  ChatTurnResult.debugRequest/debugResponse). Off by default; storing
+   *  this on every turn adds real Salesforce field storage, so it's opt-in
+   *  per agent, not a global flag. */
+  debugMode?: boolean;
   context: {
     orgId: string;
     userId: string;
@@ -88,4 +94,9 @@ export interface ChatTurnResult {
   /** Set by chat-engine.ts (not the adapters) — the Topic classified for
    *  this turn, if any, so Apex can persist it to ChatSession__c.ActiveTopic__c. */
   activeTopicName?: string | null;
+  /** Only populated when ChatTurnRequest.debugMode is true. One entry per
+   *  provider call this turn (a narration-only continuation adds a second
+   *  round) — Apex stores these verbatim on the assistant ChatMessage__c. */
+  debugRequest?: unknown[];
+  debugResponse?: unknown[];
 }
