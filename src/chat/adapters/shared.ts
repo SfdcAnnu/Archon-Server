@@ -298,6 +298,7 @@ export async function buildSystemPrompt(
   ctx:   ChatTurnRequest['context'],
   query: string,
   engineOverride?: EngineOverrideInput | null,
+  activeTopic?: { name: string; instructions: string } | null,
 ): Promise<string> {
   const config = (aiNode.config as { systemPrompt?: string }) ?? {};
   const parts: string[] = [];
@@ -318,6 +319,9 @@ export async function buildSystemPrompt(
   }
   if (config.systemPrompt && config.systemPrompt.trim().length > 0) {
     parts.push(config.systemPrompt);
+  }
+  if (activeTopic && activeTopic.instructions.trim().length > 0) {
+    parts.push(`CURRENT TOPIC: ${activeTopic.name}\n${activeTopic.instructions}`);
   }
   if (ctx.recordContextId) {
     parts.push(

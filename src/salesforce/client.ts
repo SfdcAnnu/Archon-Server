@@ -1,7 +1,7 @@
 import jsforce from 'jsforce';
 import { config } from '../config';
 import { logger } from '../logger';
-import type { AgentDefinition, AgentNode } from '../types';
+import type { AgentDefinition, AgentNode, AgentTopic, AgentAction } from '../types';
 
 /**
  * Salesforce OAuth 2.0 Client Credentials Flow.
@@ -139,6 +139,76 @@ export async function loadAgentDefinition(apiName: string, connOverride?: jsforc
     mcpTool: r.McpTool__c ?? null,
   }));
 
+  // Topics + Actions — chat-mode routing. Two flat queries + one junction
+  // query, same shape as the nodes query above; cheap (all Master-Detail
+  // to the same parent, no per-agent index concerns at this scale).
+  const topicsQuery = await conn.query<{
+    Id: string;
+    Name: string;
+    RoutingDescription__c?: string;
+    Instructions__c?: string;
+    SortOrder__c: number;
+    IsEnabled__c: boolean;
+  }>(
+    `SELECT Id, Name, RoutingDescription__c, Instructions__c, SortOrder__c, IsEnabled__c
+     FROM AgentTopic__c
+     WHERE AgentDefinition__c = '${def.Id}'
+     ORDER BY SortOrder__c ASC`,
+  );
+
+  const actionsQuery = await conn.query<{
+    Id: string;
+    Name: string;
+    Description__c?: string;
+    ActionType__c: string;
+    ToolName__c: string;
+    ConnectorId__c?: string;
+    IsEnabled__c: boolean;
+    RequiresApproval__c: boolean;
+  }>(
+    `SELECT Id, Name, Description__c, ActionType__c, ToolName__c, ConnectorId__c, IsEnabled__c, RequiresApproval__c
+     FROM AgentAction__c
+     WHERE AgentDefinition__c = '${def.Id}'`,
+  );
+
+  const topicActionsQuery = await conn.query<{
+    Id: string;
+    AgentTopic__c: string;
+    AgentAction__c: string;
+  }>(
+    `SELECT Id, AgentTopic__c, AgentAction__c
+     FROM AgentTopicAction__c
+     WHERE AgentTopic__r.AgentDefinition__c = '${def.Id}'`,
+  );
+
+  const actionIdsByTopic = new Map<string, string[]>();
+  for (const row of topicActionsQuery.records) {
+    const list = actionIdsByTopic.get(row.AgentTopic__c) ?? [];
+    list.push(row.AgentAction__c);
+    actionIdsByTopic.set(row.AgentTopic__c, list);
+  }
+
+  const topics: AgentTopic[] = topicsQuery.records.map((r) => ({
+    id: r.Id,
+    name: r.Name,
+    routingDescription: r.RoutingDescription__c ?? '',
+    instructions: r.Instructions__c ?? '',
+    sortOrder: r.SortOrder__c ?? 0,
+    isEnabled: r.IsEnabled__c !== false,
+    actionIds: actionIdsByTopic.get(r.Id) ?? [],
+  }));
+
+  const actions: AgentAction[] = actionsQuery.records.map((r) => ({
+    id: r.Id,
+    name: r.Name,
+    description: r.Description__c ?? '',
+    actionType: (r.ActionType__c as AgentAction['actionType']) ?? 'MCP',
+    toolName: r.ToolName__c,
+    connectorId: r.ConnectorId__c ?? null,
+    isEnabled: r.IsEnabled__c !== false,
+    requiresApproval: r.RequiresApproval__c === true,
+  }));
+
   return {
     id: def.Id,
     name: def.Name,
@@ -150,6 +220,8 @@ export async function loadAgentDefinition(apiName: string, connOverride?: jsforc
     canvasJson: def.CanvasJson__c ? safeJson(def.CanvasJson__c) : undefined,
     externalServerUrl: def.ExternalServerUrl__c,
     nodes,
+    topics,
+    actions,
   };
 }
 

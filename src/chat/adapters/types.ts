@@ -44,6 +44,11 @@ export interface ChatTurnRequest {
   attachments?: AttachmentInput[];
   engineOverride?: EngineOverrideInput;
   connectors?: ConnectorInput[];
+  /** ChatSession__c.ActiveTopic__c from the prior turn — classification bias only. */
+  previousTopicName?: string | null;
+  /** Set by chat-engine.ts after Topic classification; adapters just thread
+   *  it into buildSystemPrompt. Not sent by Apex. */
+  activeTopic?: { name: string; instructions: string } | null;
   context: {
     orgId: string;
     userId: string;
@@ -80,4 +85,7 @@ export interface ChatTurnResult {
   // either no restriction was configured, or the provider enforces it
   // server-side already (OpenAI).
   policyViolations?: PolicyViolation[];
+  /** Set by chat-engine.ts (not the adapters) — the Topic classified for
+   *  this turn, if any, so Apex can persist it to ChatSession__c.ActiveTopic__c. */
+  activeTopicName?: string | null;
 }
