@@ -437,6 +437,26 @@ connectorsRouter.post('/api/connectors/my-status', sessionAuth, async (req, res)
   });
 });
 
+// ── GET /api/connectors/users ─────────────────────────────────────────
+// Admin roster: every user who has (or attempted) a personal connection
+// for a provider in this org — Salesforce access page. Distinct from
+// /api/connectors/my-status, which only answers for the calling user.
+
+connectorsRouter.get('/api/connectors/users', sessionAuth, async (req, res) => {
+  const orgId = req.orgId!;
+  const providerKey = String(req.query.providerKey ?? 'salesforce_mcp');
+  const rows = await ConnectorsRepo.listUsersForOrgProvider(orgId, providerKey);
+  res.json({
+    users: rows.map(r => ({
+      configuredBy:     r.configuredBy,
+      status:            r.status,
+      accountEmail:      r.accountEmail,
+      lastConnectedAt:   r.lastConnectedAt,
+      lastErrorMessage:  r.lastErrorMessage,
+    })),
+  });
+});
+
 // ── GET /api/connectors ──────────────────────────────────────────────
 // Returns the per-org connector directory. SF MCP is synthesized from
 // OrgInstall; real Connector rows come from the DB.

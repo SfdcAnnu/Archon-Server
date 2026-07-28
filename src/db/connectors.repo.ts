@@ -39,6 +39,15 @@ export const ConnectorsRepo = {
     });
   },
 
+  /** Every per-user row for a provider in this org — admin roster view
+   *  (Salesforce access page). Excludes org-level rows (configuredBy null). */
+  async listUsersForOrgProvider(orgId: string, providerKey: string): Promise<Connector[]> {
+    return prisma.connector.findMany({
+      where: { orgId, providerKey, configuredBy: { not: null } },
+      orderBy: [{ status: 'asc' }, { lastConnectedAt: 'desc' }],
+    });
+  },
+
   /** Upsert a Pending row before the OAuth round-trip starts.
    *  Connections are PER USER (configuredBy) per provider per org. */
   async upsertPending(input: ConnectorInput): Promise<Connector> {
