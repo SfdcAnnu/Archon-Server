@@ -482,6 +482,15 @@ connectorsRouter.get('/api/connectors', sessionAuth, async (req, res) => {
   }
 
   for (const r of rows) {
+    // salesforce_mcp is represented ONLY by the synthesized OrgInstall tile
+    // above in this admin-level directory — a Connector row for it is a
+    // PER-USER personal connection (see /api/connectors/oauth/start,
+    // configuredBy), a different concept entirely (used by PerUser-mode
+    // agents' own "Connect my Salesforce", surfaced separately via
+    // /api/connectors/users). Merging both under one providerKey here
+    // made the org tile's status flap based on an unrelated personal
+    // connection's health — keep them apart.
+    if (r.providerKey === 'salesforce_mcp') continue;
     out.push({
       id:               r.id,
       providerKey:      r.providerKey,
