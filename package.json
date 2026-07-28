@@ -26,6 +26,7 @@
     "jsforce": "^3.4.1",
     "jsonwebtoken": "^9.0.2",
     "openai": "^4.65.0",
+    "pdf-parse": "^1.1.1",
     "pino": "^9.4.0",
     "pino-http": "^10.3.0",
     "prisma": "^5.22.0",
@@ -36,6 +37,7 @@
     "@types/express": "^4.17.21",
     "@types/jsonwebtoken": "^9.0.7",
     "@types/node": "^22.7.4",
+    "@types/pdf-parse": "^1.1.5",
     "pino-pretty": "^11.2.2",
     "typescript": "^5.6.2"
   }

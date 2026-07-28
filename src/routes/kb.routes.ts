@@ -12,6 +12,7 @@ import { sessionAuth } from '../auth/session';
 import { logger } from '../logger';
 import { indexDocument, reindexDocument, deleteDocument } from '../kb/indexer';
 import { testExternalPostgresConnection, closeExternalClient } from '../kb/backends/external-postgres';
+import { extractTextFromUpload } from '../kb/file-extract';
 
 export const kbRouter = Router();
 
@@ -119,13 +120,26 @@ kbRouter.post('/api/kb/documents', sessionAuth, async (req, res) => {
   const agentApiName = String(req.body?.agentApiName ?? '');
   const title = String(req.body?.title ?? '').trim();
   const fileBase64 = req.body?.fileBase64 ? String(req.body.fileBase64) : null;
+  const fileName   = req.body?.fileName ? String(req.body.fileName) : null;
   const rawText = req.body?.text ? String(req.body.text) : null;
 
   if (!agentApiName || !title) {
     res.status(400).json({ error: 'missing_fields', message: 'agentApiName and title are required.' });
     return;
   }
-  const text = fileBase64 ? Buffer.from(fileBase64, 'base64').toString('utf8') : (rawText ?? '');
+
+  let text: string;
+  if (fileBase64) {
+    try {
+      text = await extractTextFromUpload(fileBase64, fileName);
+    } catch (err) {
+      logger.warn({ err, fileName }, 'kb_file_extract_failed');
+      res.status(400).json({ error: 'extract_failed', message: err instanceof Error ? err.message : 'Could not read that file.' });
+      return;
+    }
+  } else {
+    text = rawText ?? '';
+  }
   if (!text.trim()) {
     res.status(400).json({ error: 'empty_document', message: 'No text content found in the upload.' });
     return;
