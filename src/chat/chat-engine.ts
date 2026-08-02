@@ -2,21 +2,31 @@
  * chat-engine — dispatcher that routes each chat turn to the right
  * provider adapter based on the agent's AI node sub-type.
  *
- * Also handles Topic classification + Action resolution before dispatch:
- * a cheap model call (when the agent has 2+ Topics) picks the active one,
- * whose attached Actions get merged into the connector payload the SAME
- * way a catalog node's own customTools/allowedTools already work — no new
- * execution path, just more entries in an existing, proven mechanism.
+ * Subagent routing (replaces the old Topic-classifier model): the top-level
+ * adapter call sees the agent's directly-attached 'tool' nodes AND a
+ * handoff tool declaration for each directly-attached 'subagent' node, all
+ * in the SAME request — the model's own function-calling reasoning picks
+ * between answering directly, calling a plain tool, or handing off. When it
+ * hands off, a SECOND adapter call runs as that subagent's own turn (its
+ * own systemPrompt/model/tools), and THAT result becomes the turn's real
+ * output. See subagent-router.ts for how the graph is resolved into tool
+ * lists, and claude.ts/openai.ts for how a handoff selection is detected.
+ *
+ * An agent with no subagent/tool graph nodes (never migrated, or never had
+ * any) behaves exactly as before this rewrite — resolveTopLevelToolsAndSubagents
+ * returns empty lists, so no extra tool defs are added and no second call
+ * ever happens.
  *
  * Also fires the auto session title generator off-thread after turn 3
  * so the sidebar shows a meaningful title instead of the user's greeting.
  */
 import { logger } from '../logger';
-import type { AgentDefinition, AgentNode, AgentAction, AgentTopic } from '../types';
+import type { AgentDefinition, AgentNode, AgentAction } from '../types';
 import { runClaudeAdapter } from './adapters/claude';
 import { runOpenAiAdapter } from './adapters/openai';
 import { generateSessionTitleAsync } from './title-generator';
-import { classifyTopic } from './topic-router';
+import { buildGraph } from '../orchestrator/graph';
+import { resolveTopLevelToolsAndSubagents, resolveSubagentActions, toSyntheticAiNode, type HandoffToolDef } from './subagent-router';
 import type { ChatTurnRequest, ChatTurnResult, ConnectorInput } from './adapters/types';
 
 export type { ChatTurnRequest, ChatTurnResult, ChatHistoryMessage } from './adapters/types';
@@ -27,45 +37,139 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
   const aiNode = findAiNode(req.agent);
   if (!aiNode) throw new Error('Agent has no AI orchestrator node — cannot run chat mode.');
 
-  const engineType = normalizeEngineType(aiNode.nodeSubType);
+  const graph = buildGraph(req.agent);
+  const { topLevelActions, handoffTools } = resolveTopLevelToolsAndSubagents(req.agent, graph, aiNode);
 
   logger.info({
     orgId: req.context.orgId,
     agentApiName: req.agent.apiName,
     aiNodeSubType: aiNode.nodeSubType,
-    topicCount: req.agent.topics.length,
+    topLevelActionCount: topLevelActions.length,
+    subagentCount: handoffTools.length,
   }, 'chat_turn_dispatch');
 
-  // Topic classification + Action resolution — only meaningful for engines
-  // chat mode actually supports (claude/gpt4). Gemini/unknown falls through
-  // to the existing error below with no topic work wasted first.
-  let activeTopic: AgentTopic | null = null;
-  if (engineType === 'claude' || engineType === 'openai') {
-    activeTopic = await classifyTopic({
+  const turnReq: ChatTurnRequest = {
+    ...req,
+    activeTopic: null,
+    connectors: mergeActionsIntoConnectors(req.connectors, topLevelActions),
+  };
+
+  let result = await dispatchToAdapter(aiNode, turnReq, handoffTools);
+  let finalAiNode = aiNode;
+
+  let activeSubagentName: string | null = null;
+  if (result.handoffSubagentNodeId) {
+    const subagentNode = graph.byId.get(result.handoffSubagentNodeId);
+    if (!subagentNode) {
+      // Defensive only — the handoff tool name is built FROM this node id,
+      // so this would mean the graph changed mid-turn. Don't throw; fall
+      // through with the (empty) top-level result rather than breaking an
+      // in-progress conversation over a race that shouldn't happen.
+      logger.error({ orgId: req.context.orgId, nodeId: result.handoffSubagentNodeId }, 'chat_engine_handoff_target_missing');
+    } else {
+      activeSubagentName = subagentNode.name;
+      const subagentAiNode = toSyntheticAiNode(subagentNode, aiNode);
+      const subagentActions = resolveSubagentActions(graph, subagentNode);
+      const subagentReq: ChatTurnRequest = {
+        ...req,
+        activeTopic: null,
+        connectors: mergeActionsIntoConnectors(req.connectors, subagentActions),
+      };
+
+      logger.info({
+        orgId: req.context.orgId,
+        subagentNodeId: subagentNode.id,
+        subagentName: subagentNode.name,
+        subagentActionCount: subagentActions.length,
+      }, 'chat_engine_subagent_dispatch');
+
+      // No handoffTools passed here — hard 2-tier depth cap (see
+      // subagent-router.ts's module doc for why this alone is sufficient).
+      //
+      // try/catch is deliberate: by this point the TOP-LEVEL call already
+      // succeeded and was really billed (real tokensIn/tokensOut sitting in
+      // `result`). If the subagent's own call throws — a transient provider
+      // error, or a cross-provider credential mismatch (see
+      // subagent-router.ts's KNOWN LIMITATION doc) — letting that exception
+      // escape runChatTurn would 500 the whole turn, which does two bad
+      // things at once: shows the customer nothing instead of a real reply,
+      // and (worse) makes Apex's error path insert a ChatMessage__c with no
+      // TokensIn__c/TokensOut__c set at all — silently erasing the top-level
+      // call's real spend from AgentGuardrailsController's cap tracking.
+      // Degrading here preserves both: a real reply to the customer, and
+      // `result`'s already-correct token counts.
+      let subResult: ChatTurnResult;
+      try {
+        subResult = await dispatchToAdapter(subagentAiNode, subagentReq, []);
+      } catch (err) {
+        logger.error({
+          orgId: req.context.orgId,
+          subagentNodeId: subagentNode.id,
+          err: err instanceof Error ? err.message : err,
+        }, 'chat_engine_subagent_dispatch_failed');
+        result.assistantText = "Sorry, I couldn't complete that just now — could you try again in a moment?";
+        result.toolCalls = [];
+        if (activeSubagentName !== null) result.activeTopicName = activeSubagentName;
+        return result; // tokensIn/tokensOut from the successful top-level call are preserved as-is
+      }
+      finalAiNode = subagentAiNode;
+      result = {
+        ...subResult,
+        tokensIn:  result.tokensIn  + subResult.tokensIn,
+        tokensOut: result.tokensOut + subResult.tokensOut,
+        // The spread above would otherwise silently replace the top-level
+        // call's debugRequest/debugResponse with only the subagent's —
+        // ChatTurnResult's own contract is "one entry per provider call
+        // this turn," so concatenate rather than clobber.
+        debugRequest: req.debugMode
+          ? [...(result.debugRequest ?? []), ...(subResult.debugRequest ?? [])]
+          : undefined,
+        debugResponse: req.debugMode
+          ? [...(result.debugResponse ?? []), ...(subResult.debugResponse ?? [])]
+          : undefined,
+      };
+    }
+  }
+
+  // Only set when there's an actual subagent to report — leaving the key
+  // genuinely ABSENT (not present-as-null) when there's no handoff matches
+  // pre-existing behavior and keeps Apex's `body.containsKey('activeTopicName')`
+  // gate meaningful (AgentChatController.cls only persists ActiveTopic__c
+  // when this key is present at all).
+  if (activeSubagentName !== null) {
+    result.activeTopicName = activeSubagentName;
+  }
+
+  // Fire-and-forget: after turn 3, generate a proper title in the background.
+  // Uses whichever engine actually produced the FINAL reply this turn (the
+  // subagent's, if a handoff happened) — cheapest model for that provider.
+  const engineType = normalizeEngineType(finalAiNode.nodeSubType);
+  const turnCount = countUserTurns(req.history) + 1;
+  if (turnCount === TITLE_TRIGGER_TURN && result.assistantText && engineType) {
+    generateSessionTitleAsync({
+      orgId:               req.context.orgId,
+      sessionId:           req.sessionId,
       engineType,
-      topics: req.agent.topics,
-      history: req.history,
-      newUserMessage: req.newUserMessage,
-      previousTopicName: req.previousTopicName,
-      engineOverride: req.engineOverride,
+      history:             req.history,
+      newUserMessage:      req.newUserMessage,
+      newAssistantMessage: result.assistantText,
+      engineOverride:      req.engineOverride,
     });
   }
 
-  const availableActions = resolveAvailableActions(req.agent, activeTopic);
-  const turnReq: ChatTurnRequest = {
-    ...req,
-    activeTopic: activeTopic ? { name: activeTopic.name, instructions: activeTopic.instructions } : null,
-    connectors: mergeActionsIntoConnectors(req.connectors, availableActions),
-  };
+  return result;
+}
 
-  let result: ChatTurnResult;
+async function dispatchToAdapter(
+  aiNode: AgentNode,
+  turnReq: ChatTurnRequest,
+  handoffTools: HandoffToolDef[],
+): Promise<ChatTurnResult> {
   switch (aiNode.nodeSubType) {
     case 'claude':
-      result = await runClaudeAdapter(turnReq, aiNode);
-      break;
+      return runClaudeAdapter(turnReq, aiNode, handoffTools);
     case 'gpt4':
-      result = await runOpenAiAdapter(turnReq, aiNode);
-      break;
+      return runOpenAiAdapter(turnReq, aiNode, handoffTools);
     case 'gemini':
       throw new Error(
         'Gemini adapter is not implemented yet. Use a Claude or GPT node on this agent for chat mode.',
@@ -76,45 +180,6 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
         `Use claude or gpt4 (Gemini support coming later).`,
       );
   }
-
-  result.activeTopicName = activeTopic?.name ?? null;
-
-  // Fire-and-forget: after turn 3, generate a proper title in the background.
-  // Uses the SAME engine as the agent's AI node, but with the cheapest model
-  // for that provider — one API bill, minimal cost, always available.
-  const turnCount = countUserTurns(req.history) + 1;
-  if (turnCount === TITLE_TRIGGER_TURN && result.assistantText) {
-    if (engineType) {
-      generateSessionTitleAsync({
-        orgId:               req.context.orgId,
-        sessionId:           req.sessionId,
-        engineType,
-        history:             req.history,
-        newUserMessage:      req.newUserMessage,
-        newAssistantMessage: result.assistantText,
-        engineOverride:      req.engineOverride,
-      });
-    }
-  }
-
-  return result;
-}
-
-/**
- * Which Actions apply this turn. Zero enabled Topics (none defined, or all
- * disabled) means no routing is happening at all, so the WHOLE enabled
- * library applies — same "skip complexity when there's nothing to route"
- * fallback classifyTopic itself uses. Otherwise, only the classified
- * Topic's attached Actions apply.
- */
-function resolveAvailableActions(agent: AgentDefinition, activeTopic: AgentTopic | null): AgentAction[] {
-  const enabledById = new Map(agent.actions.filter(a => a.isEnabled).map(a => [a.id, a]));
-  const hasEnabledTopics = agent.topics.some(t => t.isEnabled);
-  if (!hasEnabledTopics) return [...enabledById.values()];
-  if (!activeTopic) return [];
-  return activeTopic.actionIds
-    .map(id => enabledById.get(id))
-    .filter((a): a is AgentAction => !!a);
 }
 
 /**

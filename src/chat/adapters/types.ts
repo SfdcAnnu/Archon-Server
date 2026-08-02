@@ -91,9 +91,17 @@ export interface ChatTurnResult {
   // either no restriction was configured, or the provider enforces it
   // server-side already (OpenAI).
   policyViolations?: PolicyViolation[];
-  /** Set by chat-engine.ts (not the adapters) — the Topic classified for
-   *  this turn, if any, so Apex can persist it to ChatSession__c.ActiveTopic__c. */
+  /** Set by chat-engine.ts (not the adapters) — the subagent active for
+   *  this turn, if any (field name kept from the old Topics model so Apex's
+   *  existing ChatSession__c.ActiveTopic__c persistence needs no change). */
   activeTopicName?: string | null;
+  /** Set by the ADAPTER when the model's tool-selection picked a handoff
+   *  tool (see subagent-router.ts) instead of answering directly or using a
+   *  plain tool. When set, this call's assistantText/toolCalls are NOT the
+   *  turn's real output — chat-engine.ts discards them and makes a second
+   *  call as the named subagent's own turn. Only tokensIn/tokensOut from
+   *  THIS call still count (summed with the subagent's own usage). */
+  handoffSubagentNodeId?: string | null;
   /** Only populated when ChatTurnRequest.debugMode is true. One entry per
    *  provider call this turn (a narration-only continuation adds a second
    *  round) — Apex stores these verbatim on the assistant ChatMessage__c. */

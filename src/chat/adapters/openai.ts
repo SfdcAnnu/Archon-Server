@@ -15,6 +15,7 @@ import { InstallsRepo } from '../../db/installs.repo';
 import { buildSystemPrompt, resolveMcpServers } from './shared';
 import { loadAttachments, type LoadedAttachment } from './attachments';
 import { resolveEngine } from '../engine-resolver';
+import type { HandoffToolDef } from '../subagent-router';
 import type {
   ChatHistoryMessage,
   ChatTurnRequest,
@@ -44,9 +45,40 @@ interface OpenAiResponsesResult {
   error?: { message?: string; type?: string };
 }
 
+/**
+ * Shared by both the normal return path AND the subagent-handoff early
+ * return — OpenAI can return already-executed mcp_call/mcp_tool_call blocks
+ * in the SAME response as a function_call handoff selection, so both call
+ * sites need identical extraction rather than the handoff path silently
+ * discarding real, billed, already-executed actions. No policy-violation
+ * concept here (unlike claude.ts) — OpenAI hard-enforces allowed_tools
+ * server-side via `allowed_tools` on the mcp tool def, so an out-of-policy
+ * call can't reach us in the first place.
+ */
+function extractOpenAiToolCalls(output: OpenAiResponsesResult['output']): ToolCallSummary[] {
+  const toolCalls: ToolCallSummary[] = [];
+  for (const b of output ?? []) {
+    if (b.type === 'mcp_call' || b.type === 'mcp_tool_call') {
+      const failed = !!b.error;
+      toolCalls.push({
+        id:      b.id ?? '',
+        name:    b.name ?? '',
+        input:   (b.arguments as Record<string, unknown>) ?? {},
+        output:  failed ? `MCP call failed: ${typeof b.error === 'string' ? b.error : JSON.stringify(b.error)}` : b.output,
+        isError: failed,
+      });
+      if (failed) {
+        logger.warn({ tool: b.name, error: b.error }, 'openai_mcp_call_failed');
+      }
+    }
+  }
+  return toolCalls;
+}
+
 export async function runOpenAiAdapter(
   req: ChatTurnRequest,
   aiNode: AgentNode,
+  handoffTools: HandoffToolDef[] = [],
 ): Promise<ChatTurnResult> {
   // Resolve credentials: per-user override from Apex → fall back to .env
   const creds = resolveEngine('openai', req.engineOverride);
@@ -74,7 +106,7 @@ export async function runOpenAiAdapter(
     throw new Error('No MCP servers available for this agent. Bind a connector on the canvas, or set SF_REMOTE_MCP_URL.');
   }
 
-  const tools = servers.map(s => {
+  const mcpTools = servers.map(s => {
     const mcpTool: Record<string, unknown> = {
       type:             'mcp',
       server_label:     s.name,
@@ -85,6 +117,16 @@ export async function runOpenAiAdapter(
     if (s.allowedTools.length > 0) mcpTool.allowed_tools = s.allowedTools;
     return mcpTool;
   });
+  // Subagent handoffs are plain function tools alongside the MCP tools
+  // above — the Responses API supports mixing both in one `tools` array.
+  // No parameters needed; selecting one IS the whole signal.
+  const handoffToolDefs = handoffTools.map(h => ({
+    type: 'function',
+    name: h.name,
+    description: h.description,
+    parameters: { type: 'object', properties: {}, required: [] },
+  }));
+  const tools = [...mcpTools, ...handoffToolDefs];
 
   const baseBody = { model, tools, max_output_tokens: 8_000 };
 
@@ -106,6 +148,31 @@ export async function runOpenAiAdapter(
   if (req.debugMode) {
     debugRequests.push(redactDebugRequest({ ...baseBody, input }));
     debugResponses.push(json);
+  }
+
+  // Subagent handoff — checked BEFORE the narration-only guard below, same
+  // reasoning as the Claude adapter: a handoff selection is a complete turn
+  // on its own. This call's assistantText/toolCalls are discarded by the
+  // caller — only token usage still counts.
+  if (handoffTools.length > 0) {
+    const handoffCall = (json.output ?? []).find(
+      b => b.type === 'function_call' && handoffTools.some(h => h.name === b.name),
+    );
+    if (handoffCall) {
+      const matched = handoffTools.find(h => h.name === handoffCall.name)!;
+      logger.info({ orgId: req.context.orgId, subagentNodeId: matched.subagentNodeId }, 'openai_adapter_subagent_handoff');
+      return {
+        status: 'complete',
+        assistantText: '',
+        toolCalls: extractOpenAiToolCalls(json.output),
+        modelUsed: model,
+        tokensIn,
+        tokensOut,
+        handoffSubagentNodeId: matched.subagentNodeId,
+        debugRequest:  req.debugMode ? debugRequests  : undefined,
+        debugResponse: req.debugMode ? debugResponses : undefined,
+      };
+    }
   }
 
   // Structural (not heuristic) narration-only guard — same issue confirmed
@@ -168,24 +235,7 @@ export async function runOpenAiAdapter(
     assistantText = assistantText.trim();
   }
 
-  const toolCalls: ToolCallSummary[] = [];
-  for (const b of json.output ?? []) {
-    if (b.type === 'mcp_call' || b.type === 'mcp_tool_call') {
-      // Failed MCP calls carry `error` and a null output — surface the error
-      // text so the transcript shows WHY instead of a bare "null".
-      const failed = !!b.error;
-      toolCalls.push({
-        id:      b.id ?? '',
-        name:    b.name ?? '',
-        input:   (b.arguments as Record<string, unknown>) ?? {},
-        output:  failed ? `MCP call failed: ${typeof b.error === 'string' ? b.error : JSON.stringify(b.error)}` : b.output,
-        isError: failed,
-      });
-      if (failed) {
-        logger.warn({ tool: b.name, error: b.error }, 'openai_mcp_call_failed');
-      }
-    }
-  }
+  const toolCalls = extractOpenAiToolCalls(json.output);
 
   return {
     status: 'complete',

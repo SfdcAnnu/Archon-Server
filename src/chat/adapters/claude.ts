@@ -15,9 +15,10 @@
 import { logger } from '../../logger';
 import type { AgentNode } from '../../types';
 import { InstallsRepo } from '../../db/installs.repo';
-import { buildSystemPrompt, resolveMcpServers } from './shared';
+import { buildSystemPrompt, resolveMcpServers, type ResolvedMcpServer } from './shared';
 import { loadAttachments, type LoadedAttachment } from './attachments';
 import { resolveEngine } from '../engine-resolver';
+import type { HandoffToolDef } from '../subagent-router';
 import type {
   ChatHistoryMessage,
   ChatTurnRequest,
@@ -54,9 +55,64 @@ interface AnthropicResponse {
   error?:  { type: string; message: string };
 }
 
+/**
+ * Shared by both the normal return path AND the subagent-handoff early
+ * return — a handoff decision can arrive in the SAME response as one or
+ * more already-executed mcp_tool_use calls (Anthropic's managed-MCP loop
+ * runs those server-side before handing control back for a client-defined
+ * tool like a handoff), so both call sites need identical extraction/policy
+ * logic rather than the handoff path silently dropping real, billed,
+ * already-executed actions.
+ */
+function extractToolCallsAndViolations(
+  content: AnthropicBlock[],
+  servers: ResolvedMcpServer[],
+  orgId: string,
+): { toolCalls: ToolCallSummary[]; policyViolations: PolicyViolation[] } {
+  const toolCalls: ToolCallSummary[] = [];
+  const toolUses    = content.filter(b => b.type === 'mcp_tool_use');
+  const toolResults = content.filter(b => b.type === 'mcp_tool_result');
+  for (const use of toolUses) {
+    const result = toolResults.find(r => r.tool_use_id === use.id);
+    let resultText = '';
+    if (result?.content && result.content.length > 0) {
+      resultText = result.content[0].text ?? '';
+    }
+    toolCalls.push({
+      id:    use.id ?? '',
+      name:  use.name ?? '',
+      input: use.input ?? {},
+      output: resultText,
+      isError: result?.is_error ?? false,
+      serverName: use.server_name ?? undefined,
+    });
+  }
+
+  // Can't stop these calls before they happen (Anthropic's servers already
+  // executed them against the remote MCP server by the time we see this
+  // response — Claude can't hard-filter allowed tools yet, see the
+  // restrictionPrompt comment in runClaudeAdapter). What we CAN do is
+  // refuse to treat an out-of-policy result as good data: detect the
+  // violation and let the caller fail loudly instead of silently
+  // succeeding on a response the model wasn't supposed to produce.
+  const policyViolations: PolicyViolation[] = [];
+  for (const call of toolCalls) {
+    const server = servers.find(s => s.name === call.serverName);
+    if (!server || server.allowedTools.length === 0) continue;
+    if (!server.allowedTools.includes(call.name)) {
+      policyViolations.push({ serverName: server.name, tool: call.name, allowedTools: server.allowedTools });
+    }
+  }
+  if (policyViolations.length > 0) {
+    logger.error({ orgId, policyViolations }, 'claude_adapter_policy_violation');
+  }
+  return { toolCalls, policyViolations };
+}
+
 export async function runClaudeAdapter(
   req: ChatTurnRequest,
   aiNode: AgentNode,
+  handoffTools: HandoffToolDef[] = [],
 ): Promise<ChatTurnResult> {
   // Resolve credentials: per-user override from Apex → fall back to .env
   const creds = resolveEngine('claude', req.engineOverride);
@@ -91,6 +147,14 @@ export async function runClaudeAdapter(
     authorization_token: s.token,
   }));
   const toolsets = servers.map(s => ({ type: 'mcp_toolset', mcp_server_name: s.name }));
+  // Subagent handoffs are plain client-defined function tools alongside the
+  // managed-MCP toolsets above — Anthropic supports mixing both in one
+  // `tools` array. No input needed; selecting one IS the whole signal.
+  const handoffToolDefs = handoffTools.map(h => ({
+    name: h.name,
+    description: h.description,
+    input_schema: { type: 'object', properties: {}, required: [] },
+  }));
 
   // The mcp-client-2025-11-20 beta currently rejects both `tool_configuration`
   // on the server entry and `allowed_tools` on the toolset, so hard tool
@@ -111,7 +175,7 @@ export async function runClaudeAdapter(
     max_tokens: 8_000,
     system:     systemPrompt + restrictionPrompt,
     mcp_servers: mcpServers,
-    tools:       toolsets,
+    tools:       [...toolsets, ...handoffToolDefs],
   };
 
   logger.info({
@@ -132,6 +196,39 @@ export async function runClaudeAdapter(
   if (req.debugMode) {
     debugRequests.push(redactDebugRequest({ ...baseBody, messages }));
     debugResponses.push(json);
+  }
+
+  // Subagent handoff — checked BEFORE the narration-only guard below, since
+  // a handoff selection is a valid, complete turn on its own (there is no
+  // "real closing reply" to wait for at THIS level; chat-engine.ts is about
+  // to make a second call as the subagent's own turn). assistantText is
+  // discarded (it's routing narration, not meant for the user) but any
+  // mcp_tool_use calls the model ALREADY made earlier in this SAME response
+  // (e.g. "let me check your account" → looks something up → THEN decides
+  // to hand off) are real, already-executed actions against live Salesforce
+  // data — extracted and returned here rather than silently dropped, same
+  // policyViolations check as the normal path below.
+  if (handoffTools.length > 0) {
+    const handoffUse = (json.content ?? []).find(
+      b => b.type === 'tool_use' && handoffTools.some(h => h.name === b.name),
+    );
+    if (handoffUse) {
+      const matched = handoffTools.find(h => h.name === handoffUse.name)!;
+      logger.info({ orgId: req.context.orgId, subagentNodeId: matched.subagentNodeId }, 'claude_adapter_subagent_handoff');
+      const { toolCalls, policyViolations } = extractToolCallsAndViolations(json.content ?? [], servers, req.context.orgId);
+      return {
+        status: 'complete',
+        assistantText: '',
+        toolCalls,
+        modelUsed: model,
+        tokensIn,
+        tokensOut,
+        policyViolations: policyViolations.length > 0 ? policyViolations : undefined,
+        handoffSubagentNodeId: matched.subagentNodeId,
+        debugRequest:  req.debugMode ? debugRequests  : undefined,
+        debugResponse: req.debugMode ? debugResponses : undefined,
+      };
+    }
   }
 
   // Structural (not heuristic) narration-only guard: if the response's last
@@ -182,42 +279,7 @@ export async function runClaudeAdapter(
     .join('\n')
     .trim();
 
-  const toolCalls: ToolCallSummary[] = [];
-  const toolUses    = (json.content ?? []).filter(b => b.type === 'mcp_tool_use');
-  const toolResults = (json.content ?? []).filter(b => b.type === 'mcp_tool_result');
-  for (const use of toolUses) {
-    const result = toolResults.find(r => r.tool_use_id === use.id);
-    let resultText = '';
-    if (result?.content && result.content.length > 0) {
-      resultText = result.content[0].text ?? '';
-    }
-    toolCalls.push({
-      id:    use.id ?? '',
-      name:  use.name ?? '',
-      input: use.input ?? {},
-      output: resultText,
-      isError: result?.is_error ?? false,
-      serverName: use.server_name ?? undefined,
-    });
-  }
-
-  // Can't stop these calls before they happen (Anthropic's servers already
-  // executed them against the remote MCP server by the time we see this
-  // response — see the comment above on why we can't send a hard filter).
-  // What we CAN do is refuse to treat an out-of-policy result as good data:
-  // detect the violation and let the node executor fail loudly instead of
-  // silently succeeding on a response the model wasn't supposed to produce.
-  const policyViolations: PolicyViolation[] = [];
-  for (const call of toolCalls) {
-    const server = servers.find(s => s.name === call.serverName);
-    if (!server || server.allowedTools.length === 0) continue;
-    if (!server.allowedTools.includes(call.name)) {
-      policyViolations.push({ serverName: server.name, tool: call.name, allowedTools: server.allowedTools });
-    }
-  }
-  if (policyViolations.length > 0) {
-    logger.error({ orgId: req.context.orgId, policyViolations }, 'claude_adapter_policy_violation');
-  }
+  const { toolCalls, policyViolations } = extractToolCallsAndViolations(json.content ?? [], servers, req.context.orgId);
 
   return {
     status: 'complete',
