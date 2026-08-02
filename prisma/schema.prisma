@@ -66,6 +66,28 @@ model PendingOAuth {
   @@index([orgId])
 }
 
+// Single-use, short-lived ticket that lets the BROWSER open a WebSocket
+// directly to this server without ever holding SessionKey__c — Apex mints
+// one via a server-to-server callout (POST /api/ws/ticket, sessionAuth-
+// guarded, same as every other Apex->Node call), hands only the ticket id
+// back to the client, and the gateway redeems it atomically on upgrade
+// (delete-where-not-expired, so a replay after redemption always misses).
+// TTL is short (seconds, not minutes) since it's used within the same
+// page load that minted it — no sweep interval needed, just an
+// opportunistic cleanup alongside each mint (mirrors installs.repo.ts's
+// sweepStalePending pattern).
+model WsTicket {
+  id            String    @id @default(uuid())
+  orgId         String
+  userId        String
+  agentApiName  String
+  sessionId     String
+  createdAt     DateTime  @default(now())
+  expiresAt     DateTime
+
+  @@index([orgId])
+}
+
 // One row per SF org that has completed the Synapse Setup OAuth dance.
 // `sessionKey` is what every subsequent Apex→server callout uses as Bearer.
 // The SF tokens give the server identity-of-the-org guarantees and can be

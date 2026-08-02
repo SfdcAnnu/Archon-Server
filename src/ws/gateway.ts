@@ -1,0 +1,249 @@
+/**
+ * WebSocket gateway — the browser's other half of the ephemeral-ticket
+ * pattern (server/src/routes/ws.routes.ts mints the ticket; this redeems
+ * it on upgrade). Runs alongside the existing Express app on the SAME
+ * http.Server (server/src/index.ts switches from app.listen() to
+ * http.createServer(app) + this module's attach()), not a second port —
+ * one Render service, one URL.
+ *
+ * Security invariants (all enforced here, not left to the client):
+ *   1. Transport — reject any upgrade that didn't arrive over TLS. Render
+ *      terminates TLS at its edge, so this is defense-in-depth against a
+ *      misrouted plain connection reaching the app layer, not the primary
+ *      guarantee.
+ *   2. Origin — only Salesforce-hosted origins may open a socket here.
+ *      Checked by domain suffix (not a per-org literal list) so this
+ *      works for any org that installs the package, not just one client.
+ *      A UI Bundle's real origin is *.my.salesforce.app (confirmed
+ *      empirically against a live deploy); classic LWC pages are
+ *      *.lightning.force.com / *.my.salesforce.com. All three covered.
+ *   3. Ticket — single-use, short-lived, atomically redeemed (see
+ *      ws-tickets.repo.ts). A replayed or expired ticket is rejected.
+ *   4. Bound context — once a connection is accepted, EVERY message on it
+ *      is processed using ONLY the {orgId, userId, agentApiName,
+ *      sessionId} resolved from the ticket at redemption time. Identity-
+ *      shaped fields inside a message payload (if any ever appear) are
+ *      never trusted.
+ */
+import type { IncomingMessage, Server } from 'node:http';
+import type { Socket } from 'node:net';
+import { WebSocketServer, WebSocket } from 'ws';
+import { z } from 'zod';
+import { logger } from '../logger';
+import { config } from '../config';
+import { WsTicketsRepo } from '../db/ws-tickets.repo';
+import { getOrgConnection } from '../salesforce/per-org-connection';
+import { AgentCache } from '../chat/agent-cache';
+import { runChatTurn } from '../chat/chat-engine';
+
+const ALLOWED_ORIGIN_SUFFIXES = ['.salesforce.app', '.lightning.force.com', '.my.salesforce.com'];
+
+function isAllowedOrigin(origin: string | undefined): boolean {
+  if (!origin) return false;
+  try {
+    const host = new URL(origin).hostname;
+    return ALLOWED_ORIGIN_SUFFIXES.some(suffix => host.endsWith(suffix));
+  } catch {
+    return false;
+  }
+}
+
+interface ConnectionContext {
+  orgId: string;
+  userId: string;
+  agentApiName: string;
+  sessionId: string;
+}
+
+const connectionContexts = new WeakMap<WebSocket, ConnectionContext>();
+
+// Per-connection message rate cap — coarse, in-process. Coordinating across
+// multiple Node instances would need a shared counter; not built until a
+// real deployment actually needs it (single Render instance today).
+const MAX_MESSAGES_PER_MINUTE = 20;
+const messageTimestamps = new WeakMap<WebSocket, number[]>();
+
+function isRateLimited(ws: WebSocket): boolean {
+  const now = Date.now();
+  const windowStart = now - 60_000;
+  const timestamps = (messageTimestamps.get(ws) ?? []).filter(t => t > windowStart);
+  timestamps.push(now);
+  messageTimestamps.set(ws, timestamps);
+  return timestamps.length > MAX_MESSAGES_PER_MINUTE;
+}
+
+const turnMessageSchema = z.object({
+  newUserMessage: z.string().max(20_000),
+  history: z.array(z.object({
+    role: z.enum(['user', 'assistant', 'tool', 'system']),
+    content: z.string(),
+    toolCallsJson: z.string().nullish(),
+    toolResultsJson: z.string().nullish(),
+    toolCallId: z.string().nullish(),
+  })).default([]),
+  attachments: z.array(z.object({
+    contentDocumentId: z.string().min(15),
+    contentVersionId:  z.string().min(15).optional(),
+    fileName:          z.string().optional(),
+    mimeType:          z.string().optional(),
+    fileType:          z.string().optional(),
+    fileExtension:     z.string().optional(),
+  })).optional(),
+  engineOverride: z.object({
+    engineType:   z.string().nullish(),
+    apiKey:       z.string().nullish(),
+    endpoint:     z.string().nullish(),
+    defaultModel: z.string().nullish(),
+    connectionId: z.string().nullish(),
+  }).optional(),
+  connectors: z.array(z.object({
+    provider:     z.string().min(1),
+    mcpServerUrl: z.string().url(),
+    allowedTools: z.array(z.string()).default([]),
+    connectorId:  z.string().nullish(),
+    accessMode:   z.string().nullish(),
+    customTools:  z.array(z.object({
+      type:  z.string().min(1),
+      name:  z.string().min(1),
+      label: z.string().nullish(),
+    })).nullish(),
+  })).optional(),
+  previousTopicName: z.string().nullish(),
+  debugMode: z.boolean().optional(),
+});
+
+async function handleMessage(ws: WebSocket, ctx: ConnectionContext, raw: string): Promise<void> {
+  if (isRateLimited(ws)) {
+    ws.send(JSON.stringify({ status: 'error', error: 'rate_limited' }));
+    return;
+  }
+
+  let body: unknown;
+  try {
+    body = JSON.parse(raw);
+  } catch {
+    ws.send(JSON.stringify({ status: 'error', error: 'invalid_json' }));
+    return;
+  }
+  const parsed = turnMessageSchema.safeParse(body);
+  if (!parsed.success) {
+    ws.send(JSON.stringify({ status: 'error', error: 'invalid_body', details: parsed.error.flatten() }));
+    return;
+  }
+
+  try {
+    const conn = await getOrgConnection(ctx.orgId);
+    const agent = await AgentCache.load(ctx.orgId, ctx.agentApiName, conn);
+    if (!agent) {
+      ws.send(JSON.stringify({ status: 'error', error: 'agent_not_found' }));
+      return;
+    }
+    if (agent.status !== 'Active') {
+      ws.send(JSON.stringify({ status: 'error', error: 'agent_not_active', agentStatus: agent.status }));
+      return;
+    }
+
+    const result = await runChatTurn({
+      agent,
+      sessionId: ctx.sessionId,
+      history:   parsed.data.history,
+      newUserMessage: parsed.data.newUserMessage,
+      attachments:    parsed.data.attachments,
+      engineOverride: parsed.data.engineOverride,
+      connectors:     parsed.data.connectors,
+      previousTopicName: parsed.data.previousTopicName,
+      debugMode:      parsed.data.debugMode,
+      // Bound identity — NOT read from the message body (see module doc).
+      context: {
+        orgId: ctx.orgId,
+        userId: ctx.userId,
+        recordContextId: null,
+        recordContextType: null,
+      },
+    });
+    ws.send(JSON.stringify(result));
+  } catch (err) {
+    logger.error({ err, orgId: ctx.orgId, agentApiName: ctx.agentApiName }, 'ws_turn_failed');
+    ws.send(JSON.stringify({ status: 'error', error: 'chat_turn_failed', message: (err as Error).message }));
+  }
+}
+
+export function attach(server: Server): void {
+  const wss = new WebSocketServer({ noServer: true });
+
+  server.on('upgrade', async (req: IncomingMessage, socket: Socket, head: Buffer) => {
+    if (!req.url?.startsWith('/ws')) {
+      // Not ours — let any other upgrade handler on this server see it.
+      // Today there isn't one, so this is a clean reject.
+      socket.destroy();
+      return;
+    }
+
+    const forwardedProto = req.headers['x-forwarded-proto'];
+    const isSecure = config.nodeEnv !== 'production' || forwardedProto === 'https';
+    if (!isSecure) {
+      logger.warn({ forwardedProto }, 'ws_upgrade_rejected_insecure_transport');
+      socket.destroy();
+      return;
+    }
+
+    const origin = req.headers.origin;
+    if (!isAllowedOrigin(origin)) {
+      logger.warn({ origin }, 'ws_upgrade_rejected_origin');
+      socket.destroy();
+      return;
+    }
+
+    const url = new URL(req.url, 'http://internal');
+    const ticketId = url.searchParams.get('ticket');
+    if (!ticketId) {
+      logger.warn('ws_upgrade_rejected_missing_ticket');
+      socket.destroy();
+      return;
+    }
+
+    const ticket = await WsTicketsRepo.redeem(ticketId).catch(err => {
+      logger.error({ err }, 'ws_ticket_redeem_error');
+      return null;
+    });
+    if (!ticket) {
+      logger.warn({ ticketId }, 'ws_upgrade_rejected_invalid_ticket');
+      socket.destroy();
+      return;
+    }
+
+    wss.handleUpgrade(req, socket, head, ws => {
+      connectionContexts.set(ws, {
+        orgId: ticket.orgId,
+        userId: ticket.userId,
+        agentApiName: ticket.agentApiName,
+        sessionId: ticket.sessionId,
+      });
+      wss.emit('connection', ws, req);
+    });
+  });
+
+  wss.on('connection', (ws: WebSocket) => {
+    const ctx = connectionContexts.get(ws);
+    if (!ctx) {
+      // Unreachable in practice — every connection reaching here came
+      // through handleUpgrade above, which always sets this first.
+      ws.close(1011, 'missing_context');
+      return;
+    }
+    logger.info({ orgId: ctx.orgId, agentApiName: ctx.agentApiName }, 'ws_connection_opened');
+
+    ws.on('message', (data) => {
+      void handleMessage(ws, ctx, data.toString());
+    });
+    ws.on('close', () => {
+      logger.info({ orgId: ctx.orgId, agentApiName: ctx.agentApiName }, 'ws_connection_closed');
+      messageTimestamps.delete(ws);
+    });
+    ws.on('error', (err) => {
+      logger.error({ err, orgId: ctx.orgId }, 'ws_connection_error');
+    });
+  });
+
+  logger.info('ws_gateway_attached');
+}

@@ -1,3 +1,4 @@
+import http from 'node:http';
 import express from 'express';
 import pinoHttp from 'pino-http';
 import { config } from './config';
@@ -11,6 +12,8 @@ import { engineRouter } from './routes/engine.routes';
 import { kbRouter } from './routes/kb.routes';
 import { runsRouter } from './routes/runs.routes';
 import { agentGeneratorRouter } from './routes/agent-generator.routes';
+import { wsRouter } from './routes/ws.routes';
+import { attach as attachWsGateway } from './ws/gateway';
 import { startRunPoller } from './scheduler/run-poller';
 
 function buildApp(): express.Express {
@@ -28,6 +31,7 @@ function buildApp(): express.Express {
   app.use(kbRouter);         // /api/kb/* — sessionAuth-guarded
   app.use(runsRouter);       // /api/agent/runs/resume — sessionAuth-guarded
   app.use(agentGeneratorRouter); // /api/agent/generate — sessionAuth-guarded
+  app.use(wsRouter);         // /api/ws/ticket — sessionAuth-guarded (Apex-only)
 
   // Final error handler
   app.use((err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
@@ -39,7 +43,12 @@ function buildApp(): express.Express {
 }
 
 const app = buildApp();
-app.listen(config.port, () => {
+// http.createServer(app) instead of app.listen() — the WS gateway needs
+// the raw http.Server to hook 'upgrade' on. Same Express app, same port,
+// one Render service; nothing about the plain HTTP routes changes.
+const server = http.createServer(app);
+attachWsGateway(server);
+server.listen(config.port, () => {
   logger.info({ port: config.port, nodeEnv: config.nodeEnv }, 'archon_ai_server_started');
   startRunPoller();
 });
