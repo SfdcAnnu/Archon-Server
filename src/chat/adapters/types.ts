@@ -44,11 +44,6 @@ export interface ChatTurnRequest {
   attachments?: AttachmentInput[];
   engineOverride?: EngineOverrideInput;
   connectors?: ConnectorInput[];
-  /** ChatSession__c.ActiveTopic__c from the prior turn — classification bias only. */
-  previousTopicName?: string | null;
-  /** Set by chat-engine.ts after Topic classification; adapters just thread
-   *  it into buildSystemPrompt. Not sent by Apex. */
-  activeTopic?: { name: string; instructions: string } | null;
   /** AgentDefinition__c.DebugMode__c — when true, adapters capture the raw
    *  request/response JSON for every provider call this turn (see
    *  ChatTurnResult.debugRequest/debugResponse). Off by default; storing

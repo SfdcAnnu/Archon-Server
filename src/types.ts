@@ -72,21 +72,11 @@ export interface AgentConnection {
   toPort: string;          // 'in'
 }
 
-/** Chat-mode routing unit — a cheap classifier picks one per turn so only
- *  its instructions + attached Actions enter the prompt. See AgentTopic__c. */
-export interface AgentTopic {
-  id: string;
-  name: string;
-  routingDescription: string;
-  instructions: string;
-  sortOrder: number;
-  isEnabled: boolean;
-  /** AgentAction ids attached via the AgentTopicAction__c junction. */
-  actionIds: string[];
-}
-
 /** A reusable, named, real action a chat agent can take — an existing MCP
- *  tool, an Apex @InvocableMethod, or a Flow. See AgentAction__c. */
+ *  tool, an Apex @InvocableMethod, or a Flow. Reshaped from a graph 'tool'
+ *  AgentNode__c's ConfigJson__c by subagent-router.ts's nodeToAgentAction
+ *  — this type predates the graph model but its shape is still exactly
+ *  what mergeActionsIntoConnectors expects, so it stayed. */
 export interface AgentAction {
   id: string;
   name: string;
@@ -111,8 +101,6 @@ export interface AgentDefinition {
   canvasJson?: { connections: AgentConnection[] };
   externalServerUrl?: string;
   nodes: AgentNode[];
-  topics: AgentTopic[];
-  actions: AgentAction[];
 }
 
 /** Output produced by a single node execution. */

@@ -50,7 +50,6 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
 
   const turnReq: ChatTurnRequest = {
     ...req,
-    activeTopic: null,
     connectors: mergeActionsIntoConnectors(req.connectors, topLevelActions),
   };
 
@@ -72,7 +71,6 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
       const subagentActions = resolveSubagentActions(graph, subagentNode);
       const subagentReq: ChatTurnRequest = {
         ...req,
-        activeTopic: null,
         connectors: mergeActionsIntoConnectors(req.connectors, subagentActions),
       };
 

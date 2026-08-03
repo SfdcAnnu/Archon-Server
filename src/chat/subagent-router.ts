@@ -3,8 +3,9 @@
  *
  * A chat agent's top-level 'ai' node has directly-attached graph children
  * (via CanvasJson__c, 'tool' port) of two kinds:
- *   - 'tool' nodes  — a real, named, callable action (today's AgentAction__c,
- *     migrated into AgentNode__c.ConfigJson__c by AgentTopicsToGraphMigrator).
+ *   - 'tool' nodes  — a real, named, callable action, described directly on
+ *     AgentNode__c.ConfigJson__c (the old AgentTopic__c/AgentAction__c model
+ *     this replaced has been migrated away and removed).
  *   - 'subagent' nodes — a Level-2 domain-expert with its OWN system prompt/
  *     model, offered to the top-level model as a callable HANDOFF tool.
  *
@@ -142,10 +143,8 @@ export function resolveSubagentActions(
  *
  * KNOWN LIMITATION: credential resolution (ChatTurnRequest.engineOverride)
  * is resolved ONCE by Apex for the top-level node's NodeSubType__c and
- * reused as-is for the subagent's call. A same-provider subagent (what
- * AgentTopicsToGraphMigrator.cls always produces today — it hardcodes
- * NodeSubType__c='claude' regardless of the top-level node's own provider)
- * works correctly. A subagent on a DIFFERENT provider than the top-level
+ * reused as-is for the subagent's call. A same-provider subagent works
+ * correctly. A subagent on a DIFFERENT provider than the top-level
  * node throws inside engine-resolver.ts's resolveEngine() — there is
  * deliberately NO server-side .env fallback there (see that file's own
  * header comment) — and chat-engine.ts catches this around the subagent

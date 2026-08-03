@@ -108,7 +108,6 @@ const turnMessageSchema = z.object({
       label: z.string().nullish(),
     })).nullish(),
   })).optional(),
-  previousTopicName: z.string().nullish(),
   debugMode: z.boolean().optional(),
 });
 
@@ -151,7 +150,6 @@ async function handleMessage(ws: WebSocket, ctx: ConnectionContext, raw: string)
       attachments:    parsed.data.attachments,
       engineOverride: parsed.data.engineOverride,
       connectors:     parsed.data.connectors,
-      previousTopicName: parsed.data.previousTopicName,
       debugMode:      parsed.data.debugMode,
       // Bound identity — NOT read from the message body (see module doc).
       context: {
