@@ -27,6 +27,7 @@
  */
 import type { IncomingMessage, Server } from 'node:http';
 import type { Socket } from 'node:net';
+import type { Connection } from 'jsforce';
 import { WebSocketServer, WebSocket } from 'ws';
 import { z } from 'zod';
 import { logger } from '../logger';
@@ -35,6 +36,9 @@ import { WsTicketsRepo } from '../db/ws-tickets.repo';
 import { getOrgConnection } from '../salesforce/per-org-connection';
 import { AgentCache } from '../chat/agent-cache';
 import { runChatTurn } from '../chat/chat-engine';
+import type { ChatTurnResult } from '../chat/chat-engine';
+import { checkGuardrails } from '../salesforce/guardrails';
+import { createWsChatSession, recordWsTurn } from '../salesforce/ws-chat-persistence';
 
 const ALLOWED_ORIGIN_SUFFIXES = ['.salesforce.app', '.lightning.force.com', '.my.salesforce.com'];
 
@@ -62,6 +66,15 @@ const connectionContexts = new WeakMap<WebSocket, ConnectionContext>();
 // real deployment actually needs it (single Render instance today).
 const MAX_MESSAGES_PER_MINUTE = 20;
 const messageTimestamps = new WeakMap<WebSocket, number[]>();
+
+// Lazily-created Salesforce ChatSession__c for this connection's turns —
+// created on the first successful turn, reused for every turn after (see
+// ws-chat-persistence.ts's module doc for why this exists at all).
+interface WsSessionState {
+  chatSessionId: string;
+  nextSeq: number;
+}
+const wsSessionState = new WeakMap<WebSocket, WsSessionState>();
 
 function isRateLimited(ws: WebSocket): boolean {
   const now = Date.now();
@@ -142,6 +155,15 @@ async function handleMessage(ws: WebSocket, ctx: ConnectionContext, raw: string)
       return;
     }
 
+    // Hard stop, checked first — same guarantee AgentChatController.cls's
+    // HTTP path gets from enforceBeforeTurn(), which this WebSocket path
+    // never routes through (see guardrails.ts's module doc).
+    const guardrail = await checkGuardrails(conn, ctx.orgId);
+    if (guardrail.blocked) {
+      ws.send(JSON.stringify({ status: 'error', error: 'guardrail_exceeded', message: guardrail.message }));
+      return;
+    }
+
     const result = await runChatTurn({
       agent,
       sessionId: ctx.sessionId,
@@ -160,10 +182,50 @@ async function handleMessage(ws: WebSocket, ctx: ConnectionContext, raw: string)
       },
     });
     ws.send(JSON.stringify(result));
+
+    // Best-effort accounting, after the response is already on the wire —
+    // a Salesforce DML hiccup here must never turn a successful reply into
+    // a failed one. This is what makes the guardrail check above actually
+    // see WS-path usage on the NEXT turn (see ws-chat-persistence.ts).
+    if (result.status === 'complete') {
+      void persistTurnUsage(ws, conn, ctx, agent.id, agent.department, parsed.data.newUserMessage, result)
+        .catch(err => logger.error({ err, orgId: ctx.orgId }, 'ws_turn_persist_failed'));
+    }
   } catch (err) {
     logger.error({ err, orgId: ctx.orgId, agentApiName: ctx.agentApiName }, 'ws_turn_failed');
     ws.send(JSON.stringify({ status: 'error', error: 'chat_turn_failed', message: (err as Error).message }));
   }
+}
+
+/** Writes ChatSession__c/ChatMessage__c for a completed WS turn — see
+ *  ws-chat-persistence.ts's module doc for why this matters even though
+ *  the browser never reads these rows back. */
+async function persistTurnUsage(
+  ws: WebSocket,
+  conn: Connection,
+  ctx: ConnectionContext,
+  agentId: string,
+  department: string | undefined,
+  userText: string,
+  result: ChatTurnResult,
+): Promise<void> {
+  let state = wsSessionState.get(ws);
+  if (!state) {
+    const chatSessionId = await createWsChatSession(conn, agentId, ctx.userId, department);
+    state = { chatSessionId, nextSeq: 1 };
+    wsSessionState.set(ws, state);
+  }
+  await recordWsTurn(
+    conn,
+    state.chatSessionId,
+    state.nextSeq,
+    userText,
+    result.assistantText,
+    result.modelUsed,
+    result.tokensIn,
+    result.tokensOut,
+  );
+  state.nextSeq += 2;
 }
 
 export function attach(server: Server): void {
@@ -237,6 +299,7 @@ export function attach(server: Server): void {
     ws.on('close', () => {
       logger.info({ orgId: ctx.orgId, agentApiName: ctx.agentApiName }, 'ws_connection_closed');
       messageTimestamps.delete(ws);
+      wsSessionState.delete(ws);
     });
     ws.on('error', (err) => {
       logger.error({ err, orgId: ctx.orgId }, 'ws_connection_error');
