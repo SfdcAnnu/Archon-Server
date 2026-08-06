@@ -13,10 +13,14 @@
  * enforcement — as a side benefit these sessions also show up in the
  * existing Conversations list (agentHome), same as any other chat.
  *
- * One ChatSession__c is created lazily per WebSocket connection (not per
- * message) and reused for every turn on that connection — mirrored by the
- * caller (ws/gateway.ts) holding the returned id in its own per-connection
- * state.
+ * A ChatSession__c is resolved once per WebSocket connection (not per
+ * message) via resolveWsChatSession() below — either reusing a real,
+ * pre-existing session (the full-parity chat panel always mints its
+ * ticket against a real session obtained via startSession/getSession over
+ * REST first) or creating a fresh one (ChatTestPanel's throwaway
+ * sessions, which never match a real record) — and reused for every turn
+ * on that connection, mirrored by the caller (ws/gateway.ts) holding the
+ * returned id in its own per-connection state.
  */
 import type { Connection } from 'jsforce';
 
@@ -38,12 +42,49 @@ export async function createWsChatSession(
     ExpiresAt__c: expires.toISOString(),
     Department__c: department ?? null,
     TotalTurns__c: 0,
-    Title__c: 'Canvas test session',
   });
   if (!result.success) {
     throw new Error('Failed to create ChatSession__c for WS turn: ' + JSON.stringify(result));
   }
   return result.id;
+}
+
+/** Salesforce Id shape check — cheap way to tell "a real ChatSession__c Id
+ *  was passed at ticket-mint time" apart from an opaque client-generated
+ *  string (e.g. ChatTestPanel's `ui-bundle-test-<timestamp>`), without a
+ *  wasted query for the common test-panel case. */
+function looksLikeSalesforceId(value: string): boolean {
+  return /^[a-zA-Z0-9]{15}([a-zA-Z0-9]{3})?$/.test(value);
+}
+
+/** Resolves the ChatSession__c a WS connection's turns should write to —
+ *  reuses an existing session when the ticket's sessionId is a real,
+ *  accessible ChatSession__c (the full-parity chat panel always mints its
+ *  ticket with a real session Id obtained via startSession/getSession over
+ *  REST first), otherwise creates a fresh one exactly as before (preserves
+ *  ChatTestPanel's existing throwaway-session behavior unchanged, since its
+ *  client-generated id never matches a real record). */
+export async function resolveWsChatSession(
+  conn: Connection,
+  candidateSessionId: string,
+  agentId: string,
+  userId: string,
+  department: string | undefined,
+): Promise<{ chatSessionId: string; nextSeq: number }> {
+  if (looksLikeSalesforceId(candidateSessionId)) {
+    const existing = await conn.query<{ Id: string }>(
+      `SELECT Id FROM ChatSession__c WHERE Id = '${candidateSessionId}' AND AgentDefinition__c = '${agentId}' LIMIT 1`,
+    );
+    if (existing.records.length > 0) {
+      const lastSeq = await conn.query<{ SequenceNumber__c: number }>(
+        `SELECT SequenceNumber__c FROM ChatMessage__c WHERE ChatSession__c = '${candidateSessionId}' ORDER BY SequenceNumber__c DESC LIMIT 1`,
+      );
+      const nextSeq = (lastSeq.records[0]?.SequenceNumber__c ?? 0) + 1;
+      return { chatSessionId: candidateSessionId, nextSeq };
+    }
+  }
+  const chatSessionId = await createWsChatSession(conn, agentId, userId, department);
+  return { chatSessionId, nextSeq: 1 };
 }
 
 export async function recordWsTurn(

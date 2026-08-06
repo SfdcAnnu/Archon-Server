@@ -38,7 +38,7 @@ import { AgentCache } from '../chat/agent-cache';
 import { runChatTurn } from '../chat/chat-engine';
 import type { ChatTurnResult } from '../chat/chat-engine';
 import { checkGuardrails } from '../salesforce/guardrails';
-import { createWsChatSession, recordWsTurn } from '../salesforce/ws-chat-persistence';
+import { resolveWsChatSession, recordWsTurn } from '../salesforce/ws-chat-persistence';
 
 const ALLOWED_ORIGIN_SUFFIXES = ['.salesforce.app', '.lightning.force.com', '.my.salesforce.com'];
 
@@ -211,8 +211,7 @@ async function persistTurnUsage(
 ): Promise<void> {
   let state = wsSessionState.get(ws);
   if (!state) {
-    const chatSessionId = await createWsChatSession(conn, agentId, ctx.userId, department);
-    state = { chatSessionId, nextSeq: 1 };
+    state = await resolveWsChatSession(conn, ctx.sessionId, agentId, ctx.userId, department);
     wsSessionState.set(ws, state);
   }
   await recordWsTurn(
