@@ -14,6 +14,7 @@ export const WsTicketsRepo = {
     userId: string;
     agentApiName: string;
     sessionId: string;
+    engineOverride?: string | null;
   }): Promise<WsTicket> {
     // Opportunistic cleanup alongside each mint — same "sweep on the way
     // through" pattern as installs.repo.ts's sweepStalePending, sized for

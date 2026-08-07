@@ -39,6 +39,7 @@ import { runChatTurn } from '../chat/chat-engine';
 import type { ChatTurnResult } from '../chat/chat-engine';
 import { checkGuardrails } from '../salesforce/guardrails';
 import { resolveWsChatSession, recordWsTurn } from '../salesforce/ws-chat-persistence';
+import type { EngineOverrideInput } from '../types';
 
 const ALLOWED_ORIGIN_SUFFIXES = ['.salesforce.app', '.lightning.force.com', '.my.salesforce.com'];
 
@@ -57,6 +58,11 @@ interface ConnectionContext {
   userId: string;
   agentApiName: string;
   sessionId: string;
+  // Resolved by Apex at ticket-mint time (AgentWebSocketController.cls) and
+  // bound here at redemption — same "never trust the message body for
+  // identity" rule as orgId/userId/agentApiName/sessionId above, just
+  // applied to credentials too.
+  engineOverride?: EngineOverrideInput;
 }
 
 const connectionContexts = new WeakMap<WebSocket, ConnectionContext>();
@@ -102,13 +108,9 @@ const turnMessageSchema = z.object({
     fileType:          z.string().optional(),
     fileExtension:     z.string().optional(),
   })).optional(),
-  engineOverride: z.object({
-    engineType:   z.string().nullish(),
-    apiKey:       z.string().nullish(),
-    endpoint:     z.string().nullish(),
-    defaultModel: z.string().nullish(),
-    connectionId: z.string().nullish(),
-  }).optional(),
+  // engineOverride is deliberately NOT part of this schema — credentials are
+  // bound server-side into ConnectionContext at ticket redemption (see
+  // AgentWebSocketController.cls), never accepted from a client message.
   connectors: z.array(z.object({
     provider:     z.string().min(1),
     mcpServerUrl: z.string().url(),
@@ -170,7 +172,7 @@ async function handleMessage(ws: WebSocket, ctx: ConnectionContext, raw: string)
       history:   parsed.data.history,
       newUserMessage: parsed.data.newUserMessage,
       attachments:    parsed.data.attachments,
-      engineOverride: parsed.data.engineOverride,
+      engineOverride: ctx.engineOverride,
       connectors:     parsed.data.connectors,
       debugMode:      parsed.data.debugMode,
       // Bound identity — NOT read from the message body (see module doc).
@@ -271,12 +273,22 @@ export function attach(server: Server): void {
       return;
     }
 
+    let engineOverride: EngineOverrideInput | undefined;
+    if (ticket.engineOverride) {
+      try {
+        engineOverride = JSON.parse(ticket.engineOverride) as EngineOverrideInput;
+      } catch (err) {
+        logger.error({ err }, 'ws_ticket_engine_override_parse_failed');
+      }
+    }
+
     wss.handleUpgrade(req, socket, head, ws => {
       connectionContexts.set(ws, {
         orgId: ticket.orgId,
         userId: ticket.userId,
         agentApiName: ticket.agentApiName,
         sessionId: ticket.sessionId,
+        engineOverride,
       });
       wss.emit('connection', ws, req);
     });

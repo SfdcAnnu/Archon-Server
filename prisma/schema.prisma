@@ -77,13 +77,20 @@ model PendingOAuth {
 // opportunistic cleanup alongside each mint (mirrors installs.repo.ts's
 // sweepStalePending pattern).
 model WsTicket {
-  id            String    @id @default(uuid())
-  orgId         String
-  userId        String
-  agentApiName  String
-  sessionId     String
-  createdAt     DateTime  @default(now())
-  expiresAt     DateTime
+  id             String    @id @default(uuid())
+  orgId          String
+  userId         String
+  agentApiName   String
+  sessionId      String
+  // JSON-serialized EngineOverrideInput ({engineType, apiKey, endpoint,
+  // defaultModel, connectionId}), resolved by Apex at mint time so the
+  // gateway can bind it into ConnectionContext on redemption — never
+  // trusted from a client-sent WS message. Same bounded-exposure window
+  // as the rest of this row: single-use, deleted on redemption, TTL
+  // seconds not minutes.
+  engineOverride String?
+  createdAt      DateTime  @default(now())
+  expiresAt      DateTime
 
   @@index([orgId])
 }

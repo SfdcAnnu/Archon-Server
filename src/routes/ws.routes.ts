@@ -23,6 +23,13 @@ const ticketSchema = z.object({
   agentApiName: z.string().min(1),
   sessionId:    z.string().min(1),
   userId:       z.string().min(1),
+  engineOverride: z.object({
+    engineType:   z.string().nullish(),
+    apiKey:       z.string().nullish(),
+    endpoint:     z.string().nullish(),
+    defaultModel: z.string().nullish(),
+    connectionId: z.string().nullish(),
+  }).optional(),
 });
 
 const TTL_SECONDS = 45;
@@ -41,6 +48,7 @@ wsRouter.post('/api/ws/ticket', sessionAuth, async (req, res) => {
       userId:       parsed.data.userId,
       agentApiName: parsed.data.agentApiName,
       sessionId:    parsed.data.sessionId,
+      engineOverride: parsed.data.engineOverride ? JSON.stringify(parsed.data.engineOverride) : null,
     });
     const wsUrl = config.serverPublicUrl.replace(/^http/, 'ws') + '/ws';
     res.json({ ticket: ticket.id, wsUrl, expiresInSeconds: TTL_SECONDS });
