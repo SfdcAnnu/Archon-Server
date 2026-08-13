@@ -142,23 +142,120 @@ export const NODE_SPEC: NodeSpecEntry[] = [
     fields: [ { key: 'logExecution', type: 'toggle', description: 'true to log this run to Salesforce.' } ] },
 ];
 
-/** Renders the spec + live connector status into the generation system prompt. */
-export function buildSystemPrompt(providerStatus: Array<{ key: string; connected: boolean }>): string {
-  const nodeBlock = NODE_SPEC.map((n) => {
+/**
+ * Chat-mode's vocabulary — a live, real-time conversational agent (Slack/
+ * WhatsApp/web chat), NOT a record-triggered automation. Structurally
+ * different from NODE_SPEC above: no trigger/logic/action nodes exist in
+ * this engine at all (server/src/chat/chat-engine.ts + subagent-router.ts
+ * only understand ai/subagent/tool/catalog). Root is an 'ai' node, not a
+ * trigger.
+ */
+export const CHAT_NODE_SPEC: NodeSpecEntry[] = [
+  {
+    type: 'ai', subType: 'claude', label: 'Claude (top-level agent)',
+    when: 'Every chat agent needs EXACTLY ONE of these, as the first node (index 0) — the agent the user actually talks to. Its own subagent/tool/catalog children (if any) connect FROM this node on its "tool" port.',
+    ports: ['tool'],
+    fields: [
+      { key: 'model', type: 'picklist(claude-opus-4-7,claude-sonnet-4-6,claude-haiku-4-5)', description: 'Default to claude-sonnet-4-6 unless the task clearly needs top reasoning quality (opus) or is trivial/high-volume (haiku).' },
+      { key: 'systemPrompt', type: 'textarea', description: 'The agent\'s full persona and instructions — tone, what it can/should do, any hard rules (e.g. never quote a price without approval). This is the most important field.' },
+      { key: 'useKnowledgeBase', type: 'toggle', description: 'true if this agent should ground answers in the agent-level Knowledge Base.' },
+    ],
+  },
+  { type: 'ai', subType: 'gpt4', label: 'GPT-4 (top-level agent)', when: 'Same as claude — use only if the user specifically asked for OpenAI/GPT.', ports: ['tool'],
+    fields: [
+      { key: 'model', type: 'picklist(gpt-4o,gpt-4o-mini,gpt-4-turbo,gpt-4.1,gpt-4.1-mini)', description: 'Default gpt-4o.' },
+      { key: 'systemPrompt', type: 'textarea', description: 'Same as claude.systemPrompt.' },
+      { key: 'useKnowledgeBase', type: 'toggle', description: 'Same as claude.useKnowledgeBase.' },
+    ] },
+  { type: 'ai', subType: 'gemini', label: 'Gemini (top-level agent)', when: 'Same as claude — use only if the user specifically asked for Gemini/Google AI.', ports: ['tool'],
+    fields: [
+      { key: 'model', type: 'picklist(gemini-2.5-pro,gemini-2.5-flash,gemini-2.0-flash,gemini-2.0-flash-lite)', description: 'Default gemini-2.5-flash.' },
+      { key: 'systemPrompt', type: 'textarea', description: 'Same as claude.systemPrompt.' },
+      { key: 'useKnowledgeBase', type: 'toggle', description: 'Same as claude.useKnowledgeBase.' },
+    ] },
+  {
+    type: 'subagent', subType: 'claude', label: 'Subagent (domain expert)',
+    when: 'A Level-2 specialist the top-level agent can HAND OFF the conversation to for one specific domain (e.g. "Billing", "Escalation to Human", "Returns") — its own independent system prompt and model, not just an instruction tweak. Only add these when the requirement clearly describes distinct conversation modes/topics; a simple single-purpose agent needs none. Connects FROM the top-level ai node\'s "tool" port. A subagent may have its OWN attached tool nodes (also via its "tool" port) but cannot hand off to a further subagent — one level of handoff only.',
+    ports: ['tool'],
+    fields: [
+      { key: 'model', type: 'text', description: 'Leave "" to inherit the top-level agent\'s provider/model — the common case. Only set claude/gpt4/gemini explicitly if this specialist genuinely needs a different one.' },
+      { key: 'routingDescription', type: 'text', description: 'Shown to the TOP-LEVEL model as this subagent\'s "tool" description — this is what actually drives when it gets picked, so be specific about what belongs here vs. other subagents.', example: 'Handles billing questions, invoice lookups, and payment disputes.' },
+      { key: 'systemPrompt', type: 'textarea', description: 'This specialist\'s own full persona and instructions, independent of the top-level agent\'s.' },
+    ],
+  },
+  {
+    type: 'tool', subType: 'MCP', label: 'Tool (individually-callable action)',
+    when: 'ONE specific, named, callable action the agent (or a subagent) can invoke mid-conversation — e.g. "look up an order", "create a support ticket", "escalate to a human". Connects FROM the ai or subagent node it belongs to, on that node\'s "tool" port. Different from a catalog node (a whole browsable toolset) — use tool nodes for a small number of specific, named actions the requirement calls out explicitly.',
+    ports: [],
+    fields: [
+      { key: 'description', type: 'text', description: 'Shown to the model — what this tool does and when to call it.' },
+      { key: 'actionType', type: 'picklist(MCP,Apex,Flow)', description: 'Almost always MCP unless the requirement explicitly names an internal Apex/Flow action.' },
+      { key: 'toolName', type: 'text', description: 'The specific tool name, best-guessed from the CONNECTED PROVIDERS list — the user corrects it via the tool picker if needed.' },
+      { key: 'connectorId', type: 'text', description: 'Leave empty string — the user binds this after connecting the provider.' },
+      { key: 'requiresApproval', type: 'toggle', description: 'true if this action is costly/irreversible and the requirement mentions review or approval before it fires.' },
+    ],
+  },
+  { type: 'catalog', subType: 'salesforce_crm_tools', label: 'Salesforce Tools (catalog)', when: 'Attach to the ai or subagent node it belongs to (on that node\'s "tool" port) so it can look up/query/act on Salesforce data itself mid-conversation.', ports: [],
+    fields: [ { key: 'description', type: 'text', description: 'Shown to the AI — what this catalog is for.' }, { key: 'connectorId', type: 'text', description: 'Leave empty string.' }, { key: 'allowedTools', type: 'string[]', description: 'Subset of: list_sobjects, describe_sobject, get_record, query_records, run_report, create_record, update_record, delete_record, create_task, post_chatter, apex_invocable. Prefer read-only tools unless the requirement clearly needs writes.' } ] },
+  { type: 'catalog', subType: 'email_tools', label: 'Email Tools (catalog)', when: 'Attach to the ai or subagent node it belongs to so it can read/send email itself mid-conversation.', ports: [],
+    fields: [ { key: 'description', type: 'text', description: 'Shown to the AI.' }, { key: 'connectorId', type: 'text', description: 'Leave empty string.' }, { key: 'allowedTools', type: 'string[]', description: 'Subset of: list_emails, read_email, search_emails, send_email, reply_email, forward_email, create_draft, send_template.' } ] },
+  { type: 'catalog', subType: 'storage_tools', label: 'Storage Tools (catalog)', when: 'Attach to the ai or subagent node it belongs to so it can read/write cloud storage files itself mid-conversation.', ports: [],
+    fields: [ { key: 'description', type: 'text', description: 'Shown to the AI.' }, { key: 'connectorId', type: 'text', description: 'Leave empty string.' }, { key: 'allowedTools', type: 'string[]', description: 'Subset of: list_files, read_file, search, get_file_metadata, write_file, update_file, create_folder, move_file, delete_file, share_file.' } ] },
+  { type: 'catalog', subType: 'channel_tools', label: 'Channel Tools (catalog)', when: 'Attach to the ai or subagent node it belongs to so it can post to chat channels itself mid-conversation.', ports: [],
+    fields: [ { key: 'description', type: 'text', description: 'Shown to the AI.' }, { key: 'connectorId', type: 'text', description: 'Leave empty string.' }, { key: 'allowedTools', type: 'string[]', description: 'Subset of: list_channels, list_users, read_channel_history, post_message, update_message, add_reaction, upload_file.' } ] },
+];
+
+function renderNodeBlock(spec: NodeSpecEntry[]): string {
+  return spec.map((n) => {
     const fields = n.fields.length
       ? n.fields.map((f) => `    - ${f.key} (${f.type}): ${f.description}${f.example ? ` e.g. ${JSON.stringify(f.example)}` : ''}`).join('\n')
       : '    (no config fields)';
     return `- type="${n.type}" subType="${n.subType}" ("${n.label}") — ports: [${n.ports.join(', ') || 'none, terminal'}]\n  When to use: ${n.when}\n  Config fields:\n${fields}`;
   }).join('\n\n');
+}
 
-  const providerBlock = providerStatus.length
+function renderProviderBlock(providerStatus: Array<{ key: string; connected: boolean }>): string {
+  return providerStatus.length
     ? providerStatus.map((p) => `- ${p.key}${p.connected ? ' (connected)' : ' (not connected yet — using it is fine, it becomes a checklist item)'}`).join('\n')
     : '(no providers configured in this org yet — any provider you reference becomes a checklist item)';
+}
+
+/** Renders the spec + live connector status into the generation system prompt.
+ *  Branches on mode since chat and trigger agents are structurally different
+ *  graphs (see CHAT_NODE_SPEC's doc comment) — sharing one prompt across both
+ *  would either bloat every request with the wrong half's vocabulary or,
+ *  worse, let the model mix trigger-only nodes (logic/action) into a chat
+ *  graph the chat engine can't execute. */
+export function buildSystemPrompt(
+  providerStatus: Array<{ key: string; connected: boolean }>,
+  mode: 'trigger' | 'chat' = 'trigger',
+): string {
+  const providerBlock = renderProviderBlock(providerStatus);
+
+  if (mode === 'chat') {
+    return `You are Archon's agent-generation assistant. You turn a plain-English requirement into a complete, valid Archon CHAT agent graph — a live conversational agent (e.g. a WhatsApp/Slack/web chat assistant), NOT a record-triggered automation.
+
+ARCHON'S CHAT-MODE NODE TYPES:
+${renderNodeBlock(CHAT_NODE_SPEC)}
+
+CONNECTED PROVIDERS IN THIS ORG:
+${providerBlock}
+
+GRAPH STRUCTURE RULES:
+- Exactly one top-level node, always node index 0, always type="ai" (subType claude/gpt4/gemini).
+- Connections reference nodes by ARRAY INDEX (fromIndex/toIndex into the nodes array you return). toPort is always "in".
+- CRITICAL: every connection whose target is a "subagent" or "tool" node MUST use fromPort="tool" exactly — this is not stylistic, it is the literal port name server/src/chat/subagent-router.ts matches on. Any other fromPort value makes that subagent/tool invisible and uncallable at runtime even though it renders as connected. Catalog node connections should also use fromPort="tool" for consistency, though it is not strictly required for them.
+- Only add subagent nodes when the requirement clearly describes genuinely distinct conversation domains/specialists. Most requirements need just the one top-level ai node plus its directly-attached tool/catalog nodes — do not invent subagents to seem thorough.
+- Be PROACTIVE: if the requirement clearly implies structure it didn't spell out (e.g. "answer questions from our FAQ" implies useKnowledgeBase=true; "look up order status" implies a tool node against the best-matching connected provider), include it — but set a one-sentence "rationale" on that specific node explaining why you added it. Do not invent unrelated features.
+- Never fabricate a provider that isn't Salesforce/email/storage/channel in nature — if the requirement needs something Archon genuinely can't do, omit it and explain the gap in the setup checklist instead of inventing a fake node type.
+
+Decide whether to call ask_clarifying_questions or create_agent. Only ask questions when truly blocked — prefer a reasonable default plus a checklist note over asking.`;
+  }
 
   return `You are Archon's agent-generation assistant. You turn a plain-English automation requirement into a complete, valid Archon agent graph.
 
 ARCHON'S NODE TYPES:
-${nodeBlock}
+${renderNodeBlock(NODE_SPEC)}
 
 CONNECTED PROVIDERS IN THIS ORG:
 ${providerBlock}

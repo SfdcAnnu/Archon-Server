@@ -17,12 +17,19 @@ const MAX_TOKENS = 8000;
 /** At most one clarifying-question round-trip (up to 2 questions in it) before generation is forced. */
 export const MAX_QA_ROUNDS = 1;
 
+export type GeneratorMode = 'trigger' | 'chat';
+
 export interface QaTurn { question: string; answer: string; }
 
 export interface GenerateRequest {
   orgId: string;
   requirementText: string;
   qaHistory?: QaTurn[];
+  /** Which agent graph vocabulary to generate against — see spec.ts's
+   *  CHAT_NODE_SPEC doc comment for why this isn't a single shared prompt.
+   *  Defaults to 'trigger' to match AgentDefinition__c.ExecuteType__c's own
+   *  field default. */
+  mode?: GeneratorMode;
 }
 
 export interface GeneratedNode {
@@ -120,6 +127,7 @@ const CREATE_TOOL: Anthropic.Messages.Tool = {
 };
 
 export async function generateAgent(req: GenerateRequest, engineOverride?: EngineOverride | null): Promise<GenerateResult> {
+  const mode: GeneratorMode = req.mode ?? 'trigger';
   const creds = resolveEngine('claude', engineOverride);
   const client = new Anthropic({ apiKey: creds.apiKey });
 
@@ -127,7 +135,7 @@ export async function generateAgent(req: GenerateRequest, engineOverride?: Engin
     logger.warn({ err, orgId: req.orgId }, 'agent_generate_provider_status_failed');
     return [];
   });
-  const systemPrompt = buildSystemPrompt(providerStatus);
+  const systemPrompt = buildSystemPrompt(providerStatus, mode);
   const userMessage = buildUserMessage(req);
   // Exactly one clarification round-trip, regardless of how many questions
   // are in it (the tool itself caps a single call at 2 questions) — once
@@ -154,7 +162,7 @@ export async function generateAgent(req: GenerateRequest, engineOverride?: Engin
   }
 
   let payload = coercePayload(toolUse.input);
-  let errors = validatePayload(payload);
+  let errors = validatePayload(payload, mode);
 
   if (errors.length > 0) {
     logger.warn({ orgId: req.orgId, errors }, 'agent_generate_validation_failed_retrying');
@@ -180,13 +188,13 @@ export async function generateAgent(req: GenerateRequest, engineOverride?: Engin
     const retryToolUse = retryResponse.content.find((b): b is Anthropic.Messages.ToolUseBlock => b.type === 'tool_use');
     if (!retryToolUse) throw new Error('Could not generate a valid agent after a repair attempt.');
     payload = coercePayload(retryToolUse.input);
-    errors = validatePayload(payload);
+    errors = validatePayload(payload, mode);
     if (errors.length > 0) {
       throw new Error('Could not generate a valid agent: ' + errors.join('; '));
     }
   }
 
-  applyAutoLayout(payload.nodes, payload.connections);
+  applyAutoLayout(payload.nodes, payload.connections, mode);
   return { kind: 'agent', agent: payload };
 }
 
@@ -228,7 +236,7 @@ function coercePayload(input: unknown): GeneratedAgentPayload {
   };
 }
 
-const KNOWN_NODES: Record<string, Set<string>> = {
+const TRIGGER_KNOWN_NODES: Record<string, Set<string>> = {
   trigger: new Set(['record']),
   ai: new Set(['claude', 'gpt4', 'gemini']),
   logic: new Set(['if_else', 'set_variable', 'wait', 'approval', 'loop']),
@@ -242,7 +250,23 @@ const PORTS_BY_SUBTYPE: Record<string, string[]> = {
   approval: ['approved', 'rejected'],
 };
 
-function validatePayload(payload: GeneratedAgentPayload): string[] {
+/** Chat mode has no trigger/logic/action/end vocabulary — see spec.ts's
+ *  CHAT_NODE_SPEC. subagent's '' subType means "inherit the top-level ai
+ *  node's provider" (matches subagent-router.ts's toSyntheticAiNode
+ *  fallback); tool's subType free-forms to the same MCP/Apex/Flow enum as
+ *  its own config.actionType. */
+const CHAT_KNOWN_NODES: Record<string, Set<string>> = {
+  ai: new Set(['claude', 'gpt4', 'gemini']),
+  subagent: new Set(['claude', 'gpt4', 'gemini', '']),
+  tool: new Set(['MCP', 'Apex', 'Flow']),
+  catalog: new Set(['salesforce_crm_tools', 'storage_tools', 'email_tools', 'channel_tools']),
+};
+
+function validatePayload(payload: GeneratedAgentPayload, mode: GeneratorMode): string[] {
+  return mode === 'chat' ? validateChatPayload(payload) : validateTriggerPayload(payload);
+}
+
+function validateTriggerPayload(payload: GeneratedAgentPayload): string[] {
   const errors: string[] = [];
   const { nodes, connections } = payload;
 
@@ -253,7 +277,7 @@ function validatePayload(payload: GeneratedAgentPayload): string[] {
   if (nodes[0]?.type !== 'trigger') errors.push('The trigger node must be at index 0.');
 
   nodes.forEach((n, i) => {
-    const known = KNOWN_NODES[n.type];
+    const known = TRIGGER_KNOWN_NODES[n.type];
     if (!known) { errors.push(`Node ${i} ("${n.label}"): unknown type "${n.type}".`); return; }
     if (!known.has(n.subType)) errors.push(`Node ${i} ("${n.label}"): unknown subType "${n.subType}" for type "${n.type}".`);
   });
@@ -283,6 +307,43 @@ function validatePayload(payload: GeneratedAgentPayload): string[] {
   return errors;
 }
 
+/** CRITICAL: subagent-router.ts's nextNodes(graph, aiNode.id, 'tool') does an
+ *  exact string match on fromPort — any subagent/tool connection NOT using
+ *  fromPort="tool" renders as connected on the canvas but is silently
+ *  invisible and uncallable at real chat runtime. This is checked here as a
+ *  hard error (not a lint), specifically so a wiring mistake gets caught and
+ *  repaired before the agent ever reaches a user. Catalog connections are
+ *  NOT checked — discoverAllowedTools() (server/src/chat/adapters/shared.ts)
+ *  matches on node-id adjacency only, ignoring port, so catalog attachment
+ *  is genuinely port-agnostic. */
+function validateChatPayload(payload: GeneratedAgentPayload): string[] {
+  const errors: string[] = [];
+  const { nodes, connections } = payload;
+
+  if (nodes.length === 0) errors.push('nodes must not be empty.');
+
+  const roots = nodes.filter((n) => n.type === 'ai');
+  if (roots.length !== 1) errors.push(`Exactly one top-level "ai" node is required, found ${roots.length}.`);
+  if (nodes[0]?.type !== 'ai') errors.push('The top-level "ai" node must be at index 0.');
+
+  nodes.forEach((n, i) => {
+    const known = CHAT_KNOWN_NODES[n.type];
+    if (!known) { errors.push(`Node ${i} ("${n.label}"): unknown type "${n.type}" for chat mode (trigger/logic/action/end nodes do not exist in the chat engine).`); return; }
+    if (!known.has(n.subType)) errors.push(`Node ${i} ("${n.label}"): unknown subType "${n.subType}" for type "${n.type}".`);
+  });
+
+  connections.forEach((c, i) => {
+    if (!nodes[c.fromIndex]) { errors.push(`Connection ${i}: fromIndex ${c.fromIndex} is out of range.`); return; }
+    if (!nodes[c.toIndex]) { errors.push(`Connection ${i}: toIndex ${c.toIndex} is out of range.`); return; }
+    const toType = nodes[c.toIndex].type;
+    if ((toType === 'subagent' || toType === 'tool') && c.fromPort !== 'tool') {
+      errors.push(`Connection ${i}: targets a "${toType}" node but uses fromPort="${c.fromPort}" — must be exactly fromPort="tool" or this node will be invisible at chat runtime.`);
+    }
+  });
+
+  return errors;
+}
+
 function reachableFrom(startIndex: number, startPort: string, connections: GeneratedConnection[]): Set<number> {
   const visited = new Set<number>();
   const queue = connections.filter((c) => c.fromIndex === startIndex && c.fromPort === startPort).map((c) => c.toIndex);
@@ -295,12 +356,15 @@ function reachableFrom(startIndex: number, startPort: string, connections: Gener
   return visited;
 }
 
-/** Left-to-right layout by BFS depth from the trigger — same grid spacing agentCanvas.handleAutoLayout uses. */
-function applyAutoLayout(nodes: GeneratedNode[], connections: GeneratedConnection[]): void {
+/** Left-to-right layout by BFS depth from the root node (trigger in trigger
+ *  mode, the top-level ai node in chat mode — both always index 0 once
+ *  validated) — same grid spacing agentCanvas.handleAutoLayout uses. */
+function applyAutoLayout(nodes: GeneratedNode[], connections: GeneratedConnection[], mode: GeneratorMode): void {
   const GAP_X = 260;
   const GAP_Y = 140;
   const START_X = 60;
   const START_Y = 80;
+  const rootType = mode === 'chat' ? 'ai' : 'trigger';
 
   const children = new Map<number, number[]>();
   connections.forEach((c) => {
@@ -309,9 +373,9 @@ function applyAutoLayout(nodes: GeneratedNode[], connections: GeneratedConnectio
   });
 
   const depth = new Array(nodes.length).fill(-1);
-  const triggerIdx = Math.max(0, nodes.findIndex((n) => n.type === 'trigger'));
-  depth[triggerIdx] = 0;
-  const queue = [triggerIdx];
+  const rootIdx = Math.max(0, nodes.findIndex((n) => n.type === rootType));
+  depth[rootIdx] = 0;
+  const queue = [rootIdx];
   while (queue.length > 0) {
     const cur = queue.shift()!;
     for (const next of children.get(cur) ?? []) {

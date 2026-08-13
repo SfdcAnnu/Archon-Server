@@ -12,6 +12,7 @@ import { engineRouter } from './routes/engine.routes';
 import { kbRouter } from './routes/kb.routes';
 import { runsRouter } from './routes/runs.routes';
 import { agentGeneratorRouter } from './routes/agent-generator.routes';
+import { copilotRouter } from './routes/copilot.routes';
 import { wsRouter } from './routes/ws.routes';
 import { attach as attachWsGateway } from './ws/gateway';
 import { startRunPoller } from './scheduler/run-poller';
@@ -31,6 +32,7 @@ function buildApp(): express.Express {
   app.use(kbRouter);         // /api/kb/* — sessionAuth-guarded
   app.use(runsRouter);       // /api/agent/runs/resume — sessionAuth-guarded
   app.use(agentGeneratorRouter); // /api/agent/generate — sessionAuth-guarded
+  app.use(copilotRouter);    // /api/agent/copilot — sessionAuth-guarded
   app.use(wsRouter);         // /api/ws/ticket — sessionAuth-guarded (Apex-only)
 
   // Final error handler
