@@ -3,7 +3,7 @@
  * graph via natural language. Same "N distinct tools, branch on which came
  * back" pattern as generate.ts's ASK/CREATE choice and subagent-router.ts's
  * N-way handoff, extended here to the multi-call case: tool_choice:'auto'
- * lets Claude call zero, one, or several of the 6 mutation tools in a
+ * lets the model call zero, one, or several of the 6 mutation tools in a
  * single turn (e.g. "add a tool for X and rename the agent" -> two calls),
  * or answer in plain text with no tool calls at all (a question, or a
  * request Archon can't fulfill).
@@ -13,15 +13,19 @@
  * own graph state on an explicit Apply (propose/Apply/Discard-by-
  * construction — see CopilotPanel.tsx). Nothing here is a source of truth;
  * it's a suggestion generator.
+ *
+ * Uses OpenAI's Responses API (same adapter chat/adapters/openai.ts already
+ * uses for real chat turns), not Claude — this org's only active AI Engine
+ * Connection is OpenAI.
  */
-import Anthropic from '@anthropic-ai/sdk';
 import { resolveEngine } from '../chat/engine-resolver';
 import type { EngineOverride } from '../chat/engine-resolver';
+import { callOpenAi } from '../chat/adapters/openai';
 import { NODE_SPEC, CHAT_NODE_SPEC } from './spec';
 import type { GeneratorMode } from './generate';
 
-const MODEL = 'claude-sonnet-4-6';
-const MAX_TOKENS = 4000;
+const MODEL = 'gpt-4o';
+const MAX_OUTPUT_TOKENS = 4000;
 
 export interface CopilotGraphNode {
   id: string;
@@ -61,10 +65,13 @@ export interface CopilotResult {
   assistantText: string;
 }
 
-const ADD_NODE_TOOL: Anthropic.Messages.Tool = {
+// OpenAI Responses API function-tool shape is flat (no nested `function`
+// wrapper) — matches chat/adapters/openai.ts's own handoff tool defs.
+const ADD_NODE_TOOL = {
+  type: 'function',
   name: 'add_node',
   description: 'Add a new node to the agent graph.',
-  input_schema: {
+  parameters: {
     type: 'object',
     properties: {
       localId: { type: 'string', description: 'A short id you make up for this node (e.g. "new_1") so OTHER tool calls in this SAME turn can reference it before it exists.' },
@@ -78,19 +85,21 @@ const ADD_NODE_TOOL: Anthropic.Messages.Tool = {
     required: ['localId', 'label', 'nodeType', 'nodeSubType', 'config'],
   },
 };
-const DELETE_NODE_TOOL: Anthropic.Messages.Tool = {
+const DELETE_NODE_TOOL = {
+  type: 'function',
   name: 'delete_node',
   description: 'Remove a node (and every connection touching it) from the graph. Never delete the sole top-level ai/trigger node.',
-  input_schema: {
+  parameters: {
     type: 'object',
     properties: { nodeId: { type: 'string', description: 'Real id of an existing node.' } },
     required: ['nodeId'],
   },
 };
-const UPDATE_NODE_CONFIG_TOOL: Anthropic.Messages.Tool = {
+const UPDATE_NODE_CONFIG_TOOL = {
+  type: 'function',
   name: 'update_node_config',
   description: "Change one or more fields on an existing node's config — only the fields given are changed, everything else on the node is left as-is.",
-  input_schema: {
+  parameters: {
     type: 'object',
     properties: {
       nodeId: { type: 'string', description: 'Real id of an existing node, or a localId used earlier in this same turn.' },
@@ -99,10 +108,11 @@ const UPDATE_NODE_CONFIG_TOOL: Anthropic.Messages.Tool = {
     required: ['nodeId', 'configPatch'],
   },
 };
-const RENAME_NODE_TOOL: Anthropic.Messages.Tool = {
+const RENAME_NODE_TOOL = {
+  type: 'function',
   name: 'rename_node',
   description: "Change a node's display label.",
-  input_schema: {
+  parameters: {
     type: 'object',
     properties: {
       nodeId: { type: 'string', description: 'Real id of an existing node, or a localId used earlier in this same turn.' },
@@ -111,10 +121,11 @@ const RENAME_NODE_TOOL: Anthropic.Messages.Tool = {
     required: ['nodeId', 'name'],
   },
 };
-const ADD_CONNECTION_TOOL: Anthropic.Messages.Tool = {
+const ADD_CONNECTION_TOOL = {
+  type: 'function',
   name: 'add_connection',
   description: 'Wire two existing (or just-added, via localId) nodes together.',
-  input_schema: {
+  parameters: {
     type: 'object',
     properties: {
       fromNodeId: { type: 'string' },
@@ -125,10 +136,11 @@ const ADD_CONNECTION_TOOL: Anthropic.Messages.Tool = {
     required: ['fromNodeId', 'fromPort', 'toNodeId', 'toPort'],
   },
 };
-const DELETE_CONNECTION_TOOL: Anthropic.Messages.Tool = {
+const DELETE_CONNECTION_TOOL = {
+  type: 'function',
   name: 'delete_connection',
   description: 'Remove one wire between two nodes.',
-  input_schema: {
+  parameters: {
     type: 'object',
     properties: { connectionId: { type: 'string', description: 'Real id of an existing connection.' } },
     required: ['connectionId'],
@@ -144,33 +156,55 @@ const COPILOT_TOOLS = [
   DELETE_CONNECTION_TOOL,
 ];
 
-export async function proposeCopilotChanges(req: CopilotRequest, engineOverride?: EngineOverride | null): Promise<CopilotResult> {
-  const creds = resolveEngine('claude', engineOverride);
-  const client = new Anthropic({ apiKey: creds.apiKey });
+interface FunctionCallBlock { type: 'function_call'; id?: string; call_id?: string; name: string; arguments: string; }
 
-  const messages: Anthropic.Messages.MessageParam[] = [
-    ...(req.history ?? []).map((h): Anthropic.Messages.MessageParam => ({ role: h.role, content: h.text })),
-    { role: 'user', content: req.message },
+export async function proposeCopilotChanges(req: CopilotRequest, engineOverride?: EngineOverride | null): Promise<CopilotResult> {
+  const creds = resolveEngine('openai', engineOverride);
+  const model = creds.defaultModel || MODEL;
+
+  const input: Array<{ role: string; content: Array<Record<string, unknown>> }> = [
+    { role: 'system', content: [{ type: 'input_text', text: buildCopilotSystemPrompt(req) }] },
+    ...(req.history ?? []).map(h => ({
+      role: h.role,
+      content: [{ type: h.role === 'assistant' ? 'output_text' : 'input_text', text: h.text }],
+    })),
+    { role: 'user', content: [{ type: 'input_text', text: req.message }] },
   ];
 
-  const response = await client.messages.create({
-    model: MODEL,
-    max_tokens: MAX_TOKENS,
-    system: buildCopilotSystemPrompt(req),
-    tools: COPILOT_TOOLS,
-    tool_choice: { type: 'auto' },
-    messages,
-  });
+  const response = await callOpenAi(
+    {
+      model,
+      max_output_tokens: MAX_OUTPUT_TOKENS,
+      tools: COPILOT_TOOLS,
+      tool_choice: 'auto',
+      input,
+    },
+    creds.apiKey,
+  );
+  if (response.error) throw new Error(response.error.message ?? 'OpenAI API error');
 
-  const operations: CopilotOperation[] = response.content
-    .filter((b): b is Anthropic.Messages.ToolUseBlock => b.type === 'tool_use')
-    .map(b => ({ tool: b.name, input: b.input as Record<string, unknown> }));
+  const output = response.output ?? [];
+  const operations: CopilotOperation[] = output
+    .filter((b): b is FunctionCallBlock => b.type === 'function_call' && (b as FunctionCallBlock).name != null)
+    .map(b => {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(b.arguments);
+      } catch {
+        parsed = {};
+      }
+      return { tool: b.name, input: parsed as Record<string, unknown> };
+    });
 
-  const assistantText = response.content
-    .filter((b): b is Anthropic.Messages.TextBlock => b.type === 'text')
-    .map(b => b.text)
-    .join('\n')
-    .trim();
+  let assistantText = response.output_text?.trim() ?? '';
+  if (!assistantText) {
+    for (const b of output) {
+      if (b.type === 'message' && Array.isArray(b.content)) {
+        for (const c of b.content) if (typeof c.text === 'string') assistantText += c.text;
+      }
+    }
+    assistantText = assistantText.trim();
+  }
 
   return { operations, assistantText };
 }

@@ -25,7 +25,7 @@ import type {
 
 const OPENAI_URL = 'https://api.openai.com/v1/responses';
 
-interface OpenAiResponsesResult {
+export interface OpenAiResponsesResult {
   id:     string;
   model:  string;
   output: Array<{
@@ -262,7 +262,10 @@ function redactDebugRequest(body: Record<string, unknown>): Record<string, unkno
   };
 }
 
-async function callOpenAi(
+/** Thin fetch wrapper around the Responses API — exported so callers
+ *  outside the chat engine (the agent generator, the builder copilot) can
+ *  reuse the exact same request/error handling without duplicating it. */
+export async function callOpenAi(
   body: Record<string, unknown>,
   apiKey: string,
 ): Promise<OpenAiResponsesResult> {

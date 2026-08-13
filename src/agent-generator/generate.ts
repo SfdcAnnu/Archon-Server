@@ -1,19 +1,20 @@
 /**
  * Orchestrates AI agent generation: builds the prompt from spec.ts, calls
- * Claude with two tools (ask a clarifying question, or commit to a graph),
+ * OpenAI (Responses API, same adapter chat/adapters/openai.ts already
+ * uses) with two tools (ask a clarifying question, or commit to a graph),
  * validates the result against the same structural rules the engine itself
  * enforces at runtime, and repairs once on failure before giving up.
  */
-import Anthropic from '@anthropic-ai/sdk';
 import { resolveEngine } from '../chat/engine-resolver';
 import type { EngineOverride } from '../chat/engine-resolver';
+import { callOpenAi, type OpenAiResponsesResult } from '../chat/adapters/openai';
 import { getOrgConnection } from '../salesforce/per-org-connection';
 import { ConnectorsRepo } from '../db/connectors.repo';
 import { buildSystemPrompt } from './spec';
 import { logger } from '../logger';
 
-const MODEL = 'claude-sonnet-4-6';
-const MAX_TOKENS = 8000;
+const MODEL = 'gpt-4o';
+const MAX_OUTPUT_TOKENS = 8000;
 /** At most one clarifying-question round-trip (up to 2 questions in it) before generation is forced. */
 export const MAX_QA_ROUNDS = 1;
 
@@ -54,10 +55,14 @@ export type GenerateResult =
   | { kind: 'questions'; questions: string[] }
   | { kind: 'agent'; agent: GeneratedAgentPayload };
 
-const ASK_TOOL: Anthropic.Messages.Tool = {
+// OpenAI Responses API function-tool shape is flat (type/name/description/
+// parameters at the top level, no nested `function` wrapper) — matches how
+// chat/adapters/openai.ts already declares its own handoff tools.
+const ASK_TOOL = {
+  type: 'function',
   name: 'ask_clarifying_questions',
   description: 'Ask the user 1-2 short, specific questions ONLY when the requirement is genuinely too ambiguous to build a sensible agent. Prefer a reasonable default + a checklist note over asking, whenever possible.',
-  input_schema: {
+  parameters: {
     type: 'object',
     properties: {
       questions: { type: 'array', items: { type: 'string' }, minItems: 1, maxItems: 2 },
@@ -66,10 +71,11 @@ const ASK_TOOL: Anthropic.Messages.Tool = {
   },
 };
 
-const CREATE_TOOL: Anthropic.Messages.Tool = {
+const CREATE_TOOL = {
+  type: 'function',
   name: 'create_agent',
   description: 'Create a complete Archon agent graph from the requirement.',
-  input_schema: {
+  parameters: {
     type: 'object',
     properties: {
       agent: {
@@ -126,10 +132,26 @@ const CREATE_TOOL: Anthropic.Messages.Tool = {
   },
 };
 
+interface FunctionCallBlock { type: 'function_call'; id?: string; call_id?: string; name: string; arguments: string; }
+
+function findFunctionCall(output: OpenAiResponsesResult['output'], name?: string): FunctionCallBlock | undefined {
+  return (output ?? []).find(
+    (b): b is FunctionCallBlock => b.type === 'function_call' && (b as FunctionCallBlock).name != null && (!name || (b as FunctionCallBlock).name === name)
+  );
+}
+
+function parseCallArguments(call: FunctionCallBlock): unknown {
+  try {
+    return JSON.parse(call.arguments);
+  } catch {
+    return {};
+  }
+}
+
 export async function generateAgent(req: GenerateRequest, engineOverride?: EngineOverride | null): Promise<GenerateResult> {
   const mode: GeneratorMode = req.mode ?? 'trigger';
-  const creds = resolveEngine('claude', engineOverride);
-  const client = new Anthropic({ apiKey: creds.apiKey });
+  const creds = resolveEngine('openai', engineOverride);
+  const model = creds.defaultModel || MODEL;
 
   const providerStatus = await fetchProviderStatus(req.orgId).catch((err) => {
     logger.warn({ err, orgId: req.orgId }, 'agent_generate_provider_status_failed');
@@ -142,52 +164,66 @@ export async function generateAgent(req: GenerateRequest, engineOverride?: Engin
   // the user has answered anything, generation is forced on this call.
   const canStillAsk = !req.qaHistory || req.qaHistory.length === 0;
 
-  const response = await client.messages.create({
-    model: MODEL,
-    max_tokens: MAX_TOKENS,
-    system: systemPrompt,
-    tools: canStillAsk ? [ASK_TOOL, CREATE_TOOL] : [CREATE_TOOL],
-    tool_choice: canStillAsk ? { type: 'any' } : { type: 'tool', name: 'create_agent' },
-    messages: [{ role: 'user', content: userMessage }],
-  });
+  const baseBody = {
+    model,
+    max_output_tokens: MAX_OUTPUT_TOKENS,
+    input: [
+      { role: 'system', content: [{ type: 'input_text', text: systemPrompt }] },
+      { role: 'user', content: [{ type: 'input_text', text: userMessage }] },
+    ],
+  };
 
-  const toolUse = response.content.find((b): b is Anthropic.Messages.ToolUseBlock => b.type === 'tool_use');
-  if (!toolUse) {
-    throw new Error('The model did not return a usable response. Try rephrasing the requirement.');
-  }
+  const response = await callOpenAi(
+    {
+      ...baseBody,
+      tools: canStillAsk ? [ASK_TOOL, CREATE_TOOL] : [CREATE_TOOL],
+      tool_choice: canStillAsk ? 'required' : { type: 'function', name: 'create_agent' },
+    },
+    creds.apiKey,
+  );
+  if (response.error) throw new Error(response.error.message ?? 'OpenAI API error');
 
-  if (toolUse.name === 'ask_clarifying_questions') {
-    const input = toolUse.input as { questions: string[] };
+  const askCall = findFunctionCall(response.output, 'ask_clarifying_questions');
+  if (askCall) {
+    const input = parseCallArguments(askCall) as { questions: string[] };
     return { kind: 'questions', questions: input.questions ?? [] };
   }
 
-  let payload = coercePayload(toolUse.input);
+  const createCall = findFunctionCall(response.output, 'create_agent');
+  if (!createCall) {
+    throw new Error('The model did not return a usable response. Try rephrasing the requirement.');
+  }
+
+  let payload = coercePayload(parseCallArguments(createCall));
   let errors = validatePayload(payload, mode);
 
   if (errors.length > 0) {
     logger.warn({ orgId: req.orgId, errors }, 'agent_generate_validation_failed_retrying');
-    const retryResponse = await client.messages.create({
-      model: MODEL,
-      max_tokens: MAX_TOKENS,
-      system: systemPrompt,
-      tools: [CREATE_TOOL],
-      tool_choice: { type: 'tool', name: 'create_agent' },
-      messages: [
-        { role: 'user', content: userMessage },
-        { role: 'assistant', content: response.content },
-        {
+    // previous_response_id continuation — same pattern chat/adapters/
+    // openai.ts's narration-only guard already uses, rather than manually
+    // replaying the whole conversation the way Anthropic's tool_result flow
+    // needs to.
+    const retryResponse = await callOpenAi(
+      {
+        model,
+        max_output_tokens: MAX_OUTPUT_TOKENS,
+        tools: [CREATE_TOOL],
+        tool_choice: { type: 'function', name: 'create_agent' },
+        previous_response_id: response.id,
+        input: [{
           role: 'user',
           content: [{
-            type: 'tool_result',
-            tool_use_id: toolUse.id,
-            content: `Your output had these problems — fix them and call create_agent again with a corrected, complete graph:\n${errors.join('\n')}`,
+            type: 'input_text',
+            text: `Your output had these problems — fix them and call create_agent again with a corrected, complete graph:\n${errors.join('\n')}`,
           }],
-        },
-      ],
-    });
-    const retryToolUse = retryResponse.content.find((b): b is Anthropic.Messages.ToolUseBlock => b.type === 'tool_use');
-    if (!retryToolUse) throw new Error('Could not generate a valid agent after a repair attempt.');
-    payload = coercePayload(retryToolUse.input);
+        }],
+      },
+      creds.apiKey,
+    );
+    if (retryResponse.error) throw new Error(retryResponse.error.message ?? 'OpenAI API error');
+    const retryCall = findFunctionCall(retryResponse.output, 'create_agent');
+    if (!retryCall) throw new Error('Could not generate a valid agent after a repair attempt.');
+    payload = coercePayload(parseCallArguments(retryCall));
     errors = validatePayload(payload, mode);
     if (errors.length > 0) {
       throw new Error('Could not generate a valid agent: ' + errors.join('; '));
