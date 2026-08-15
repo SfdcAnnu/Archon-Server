@@ -97,7 +97,7 @@ export async function runOpenAiAdapter(
     ? await loadAttachments(req.context.orgId, req.attachments)
     : [];
   const input = mapHistoryForOpenAi(req.history, req.newUserMessage, systemPrompt, attachments);
-
+  
   // Multi-connector: Salesforce sends connectors[] each turn; we attach the
   // right token per provider. Legacy fallback = single env-configured SF MCP.
   // OpenAI enforces allowed_tools HARD — unticked tools are invisible to the model.
@@ -138,10 +138,26 @@ export async function runOpenAiAdapter(
     mcpServers: servers.map(s => ({ name: s.name, allowedToolCount: s.allowedTools.length })),
   }, 'openai_adapter_request');
 
+  // Attachments summary (do NOT log binary/base64 contents)
+  if (attachments.length > 0) {
+    try {
+      logger.info({ orgId: req.context.orgId, attachments: attachments.map(a => ({ fileName: a.fileName, kind: a.kind })) }, 'openai_adapter_attachments_summary');
+    } catch (err) {
+      logger.warn({ orgId: req.context.orgId, err }, 'openai_adapter_attachments_log_failed');
+    }
+  }
+
   const debugRequests:  unknown[] = [];
   const debugResponses: unknown[] = [];
 
   const t0 = Date.now();
+  // Redact sensitive headers before logging the full request body
+  try {
+    logger.info({ orgId: req.context.orgId, openaiRequest: redactDebugRequest({ ...baseBody, input }) }, 'openai_adapter_request_full');
+  } catch (err) {
+    logger.warn({ orgId: req.context.orgId, err }, 'openai_adapter_redact_request_failed');
+  }
+
   let json = await callOpenAi({ ...baseBody, input }, apiKey);
   let tokensIn  = json.usage?.input_tokens  ?? 0;
   let tokensOut = json.usage?.output_tokens ?? 0;
@@ -223,6 +239,13 @@ export async function runOpenAiAdapter(
     ms: Date.now() - t0,
   }, 'openai_adapter_response');
 
+  // Log the raw response (summary) we received from OpenAI
+  try {
+    logger.info({ orgId: req.context.orgId, responseId: json.id, responseModel: json.model, outputBlocks: (json.output ?? []).length, outputTextLen: json.output_text ? json.output_text.length : 0, usage: json.usage, error: json.error }, 'openai_adapter_raw_response');
+  } catch (err) {
+    logger.warn({ orgId: req.context.orgId, err }, 'openai_adapter_log_response_failed');
+  }
+
   // Preferred: use the flattened output_text field OpenAI provides
   let assistantText = json.output_text?.trim() ?? '';
   if (!assistantText) {
@@ -236,6 +259,13 @@ export async function runOpenAiAdapter(
   }
 
   const toolCalls = extractOpenAiToolCalls(json.output);
+
+  // Log extracted tool calls and assistant preview for traceability
+  try {
+    logger.info({ orgId: req.context.orgId, assistantPreview: assistantText ? assistantText.slice(0, 400) : '', toolCallsCount: toolCalls.length, toolCalls }, 'openai_adapter_final');
+  } catch (err) {
+    logger.warn({ orgId: req.context.orgId, err }, 'openai_adapter_final_log_failed');
+  }
 
   return {
     status: 'complete',
