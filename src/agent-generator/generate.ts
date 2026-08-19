@@ -230,8 +230,50 @@ export async function generateAgent(req: GenerateRequest, engineOverride?: Engin
     }
   }
 
+  normalizeSalesforceCatalogTools(payload.nodes);
   applyAutoLayout(payload.nodes, payload.connections, mode);
   return { kind: 'agent', agent: payload };
+}
+
+/** The runtime enforces a catalog's allowedTools by EXACT name against the
+ *  live MCP server — a name the server doesn't expose silently gives the
+ *  agent no tools at all (found the hard way: a generated agent shipped
+ *  get_record/query_records/... from this spec's old stale vocabulary and
+ *  ended up with zero working Salesforce tools while looking fine on the
+ *  canvas). The spec now teaches the real names; this is the belt to that
+ *  suspenders — map legacy spellings to the live server's names and drop
+ *  anything still unrecognized, falling back to the read-only set rather
+ *  than an empty (i.e. useless) catalog. */
+const SF_TOOL_ALIASES: Record<string, string> = {
+  query_records: 'soqlQuery',
+  get_record: 'soqlQuery',
+  run_report: 'soqlQuery',
+  list_sobjects: 'getObjectSchema',
+  describe_sobject: 'getObjectSchema',
+  get_related_records: 'getRelatedRecords',
+  create_record: 'createSobjectRecord',
+  create_task: 'createSobjectRecord',
+  post_chatter: 'createSobjectRecord',
+  update_record: 'updateSobjectRecord',
+  delete_record: 'deleteSobjectRecord',
+};
+const SF_REAL_TOOLS = new Set([
+  'soqlQuery', 'getObjectSchema', 'getRelatedRecords', 'getUserInfo', 'listRecentSobjectRecords', 'find',
+  'createSobjectRecord', 'updateSobjectRecord', 'deleteSobjectRecord', 'updateRelatedRecord', 'deleteRelatedRecord',
+]);
+const SF_READONLY_DEFAULT = ['soqlQuery', 'getObjectSchema', 'getRelatedRecords', 'getUserInfo'];
+
+function normalizeSalesforceCatalogTools(nodes: GeneratedNode[]): void {
+  for (const n of nodes) {
+    if (n.type !== 'catalog' || n.subType !== 'salesforce_crm_tools') continue;
+    const raw = Array.isArray(n.config.allowedTools) ? (n.config.allowedTools as unknown[]).map(String) : [];
+    const normalized = [...new Set(raw.map((t) => SF_TOOL_ALIASES[t] ?? t).filter((t) => SF_REAL_TOOLS.has(t)))];
+    n.config.allowedTools = normalized.length > 0 ? normalized : [...SF_READONLY_DEFAULT];
+    // The runtime maps a catalog to its MCP server via config.provider —
+    // without it the connector is never attached and the catalog is
+    // decorative (the second half of the same silent-failure bug).
+    if (!n.config.provider) n.config.provider = 'salesforce_mcp';
+  }
 }
 
 function buildUserMessage(req: GenerateRequest): string {
