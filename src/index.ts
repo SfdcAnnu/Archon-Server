@@ -20,7 +20,11 @@ import { startRunPoller } from './scheduler/run-poller';
 function buildApp(): express.Express {
   const app = express();
 
-  app.use(express.json({ limit: '2mb' }));
+  // 10mb: requirement-document uploads (base64 PDFs) ride inside JSON
+  // bodies on /api/agent/analyze|generate — 2mb rejected real-world PDFs,
+  // and the rejection surfaced as an opaque 500 (see the error handler's
+  // status passthrough below).
+  app.use(express.json({ limit: '10mb' }));
   app.use(pinoHttp({ logger }));
 
   app.use(healthRouter);
@@ -35,10 +39,13 @@ function buildApp(): express.Express {
   app.use(copilotRouter);    // /api/agent/copilot — sessionAuth-guarded
   app.use(wsRouter);         // /api/ws/ticket — sessionAuth-guarded (Apex-only)
 
-  // Final error handler
-  app.use((err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+  // Final error handler. body-parser/http errors carry a real statusCode
+  // (413 too-large, 400 bad JSON, …) — pass it through instead of masking
+  // everything as a bare 500, so clients see an actionable message.
+  app.use((err: Error & { statusCode?: number; status?: number }, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
     logger.error({ err }, 'unhandled_error');
-    res.status(500).json({ error: 'internal_error', message: err.message });
+    const status = err.statusCode ?? err.status ?? 500;
+    res.status(status).json({ error: status === 500 ? 'internal_error' : 'request_error', message: err.message });
   });
 
   return app;
