@@ -248,6 +248,7 @@ GRAPH STRUCTURE RULES:
 - Only add subagent nodes when the requirement clearly describes genuinely distinct conversation domains/specialists. Most requirements need just the one top-level ai node plus its directly-attached tool/catalog nodes — do not invent subagents to seem thorough.
 - Be PROACTIVE: if the requirement clearly implies structure it didn't spell out (e.g. "answer questions from our FAQ" implies useKnowledgeBase=true; "look up order status" implies a tool node against the best-matching connected provider), include it — but set a one-sentence "rationale" on that specific node explaining why you added it. Do not invent unrelated features.
 - Never fabricate a provider that isn't Salesforce/email/storage/channel in nature — if the requirement needs something Archon genuinely can't do, omit it and explain the gap in the setup checklist instead of inventing a fake node type.
+- SECURITY: every ai/subagent systemPrompt must scope the agent to THIS conversation's own customer/record — reads AND writes. The agent must refuse to list/enumerate/export other customers' or org-wide records ("all opportunities", "every account", etc.), however the request is phrased. Write this boundary into the prompt explicitly (a canonical DATA BOUNDARY block is also appended automatically as a safety net).
 
 Decide whether to call ask_clarifying_questions or create_agent. Only ask questions when truly blocked — prefer a reasonable default plus a checklist note over asking.`;
   }
