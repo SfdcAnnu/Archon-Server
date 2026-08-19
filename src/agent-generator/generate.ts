@@ -22,6 +22,26 @@ export type GeneratorMode = 'trigger' | 'chat';
 
 export interface QaTurn { question: string; answer: string; }
 
+/** Mirrors analyze.ts's CapabilityResolution — duplicated as a loose type
+ *  here rather than imported to keep generate.ts free of import cycles
+ *  (analyze.ts imports GeneratorMode from this file). */
+export interface ResolvedCapability {
+  title: string;
+  requirementQuote: string;
+  /** Subagent/domain this capability's node belongs under; absent = root. */
+  domain?: string;
+  resolution: {
+    kind: 'catalog' | 'mcp_tool' | 'apex_tool' | 'flow_tool' | 'instruction' | 'deferred';
+    provider?: string;
+    allowedTools?: string[];
+    toolName?: string;
+    name?: string;
+    description?: string;
+    note?: string;
+    checklistTitle?: string;
+  };
+}
+
 export interface GenerateRequest {
   orgId: string;
   requirementText: string;
@@ -31,6 +51,14 @@ export interface GenerateRequest {
    *  Defaults to 'trigger' to match AgentDefinition__c.ExecuteType__c's own
    *  field default. */
   mode?: GeneratorMode;
+  /** v2 guided flow: the capability contract agreed with the user in the
+   *  Review step (analyze.ts plan + their answers, all finalized). When
+   *  present, generation must follow it exactly — no invented tools, no
+   *  silent blanks; only kind:'deferred' capabilities may produce an
+   *  unbound node, explicitly marked config.deferred=true. */
+  resolvedCapabilities?: ResolvedCapability[];
+  /** Extra grounding text (rendered pack) appended to the system prompt. */
+  groundingText?: string;
 }
 
 export interface GeneratedNode {
@@ -157,12 +185,16 @@ export async function generateAgent(req: GenerateRequest, engineOverride?: Engin
     logger.warn({ err, orgId: req.orgId }, 'agent_generate_provider_status_failed');
     return [];
   });
-  const systemPrompt = buildSystemPrompt(providerStatus, mode);
+  const systemPrompt = buildSystemPrompt(providerStatus, mode)
+    + (req.groundingText ? `\n\nORG GROUNDING (real, live-inspected — never invent names beyond this):\n${req.groundingText}` : '');
   const userMessage = buildUserMessage(req);
   // Exactly one clarification round-trip, regardless of how many questions
   // are in it (the tool itself caps a single call at 2 questions) — once
   // the user has answered anything, generation is forced on this call.
-  const canStillAsk = !req.qaHistory || req.qaHistory.length === 0;
+  // The v2 guided flow (capability contract present) never asks here at
+  // all — every question was already settled in the Review step.
+  const canStillAsk = (!req.qaHistory || req.qaHistory.length === 0)
+    && !(req.resolvedCapabilities && req.resolvedCapabilities.length > 0);
 
   const baseBody = {
     model,
@@ -282,6 +314,28 @@ function buildUserMessage(req: GenerateRequest): string {
     const qa = req.qaHistory.map((t, i) => `Q${i + 1}: ${t.question}\nA${i + 1}: ${t.answer}`).join('\n\n');
     parts.push(`PREVIOUSLY ASKED QUESTIONS AND THE USER'S ANSWERS:\n${qa}`);
     parts.push('You now have this additional context. Call create_agent unless something is still genuinely blocking.');
+  }
+  if (req.resolvedCapabilities && req.resolvedCapabilities.length > 0) {
+    const contract = req.resolvedCapabilities.map((c, i) => {
+      const r = c.resolution;
+      let binding: string;
+      switch (r.kind) {
+        case 'catalog':    binding = `catalog node on provider "${r.provider}" with allowedTools EXACTLY [${(r.allowedTools ?? []).join(', ')}] and config.provider="${r.provider}"`; break;
+        case 'mcp_tool':   binding = `tool node, actionType MCP, connectorId="${r.provider}", toolName="${r.toolName}"`; break;
+        case 'apex_tool':  binding = `tool node, actionType Apex, toolName="${r.name}"`; break;
+        case 'flow_tool':  binding = `tool node, actionType Flow, toolName="${r.name}"`; break;
+        case 'instruction': binding = `NO node — fold into the agent's instructions/system prompt: ${r.note ?? ''}`; break;
+        case 'deferred':   binding = `tool node with config.deferred=true, empty connectorId/toolName allowed ONLY here, plus a setupChecklist item titled "${r.checklistTitle ?? c.title}"`; break;
+      }
+      const owner = c.domain ? ` [under subagent "${c.domain}"]` : '';
+      return `${i + 1}. ${c.title} ("${c.requirementQuote}") -> ${binding}${owner}${r.description ? ` — ${r.description}` : ''}`;
+    }).join('\n');
+    const domains = [...new Set(req.resolvedCapabilities.map(c => c.domain).filter(Boolean))] as string[];
+    const structureNote = domains.length > 0
+      ? `\nSTRUCTURE: create ONE subagent node per domain [${domains.join(', ')}] with a clear routingDescription and systemPrompt for that specialty; wire each domain's tool/catalog nodes to ITS subagent (fromPort "tool"), and root-level (no-domain) bindings directly to the top-level ai node.`
+      : '';
+    parts.push(`CAPABILITY CONTRACT — already agreed with the user. Follow it EXACTLY: one binding per line, no extra tool/catalog nodes beyond these, no renamed tools, no other deferred/blank nodes:${structureNote}\n${contract}`);
+    parts.push('Call create_agent now. Do not ask questions — every decision has been made above.');
   }
   return parts.join('\n\n');
 }
@@ -416,6 +470,37 @@ function validateChatPayload(payload: GeneratedAgentPayload): string[] {
     const toType = nodes[c.toIndex].type;
     if ((toType === 'subagent' || toType === 'tool') && c.fromPort !== 'tool') {
       errors.push(`Connection ${i}: targets a "${toType}" node but uses fromPort="${c.fromPort}" — must be exactly fromPort="tool" or this node will be invisible at chat runtime.`);
+    }
+  });
+
+  // STRUCTURE RULE (v2): a root drowning in direct tool attachments is the
+  // anti-pattern the subagent tier exists to prevent — tool-selection
+  // accuracy degrades well past ~10 declared tools, and every one is paid
+  // for on every request. Force domain grouping instead.
+  const rootIdx = nodes.findIndex((n) => n.type === 'ai');
+  if (rootIdx >= 0) {
+    const directAttachments = connections.filter(
+      (c) => c.fromIndex === rootIdx && ['tool', 'catalog'].includes(nodes[c.toIndex]?.type ?? ''),
+    ).length;
+    const hasSubagents = nodes.some((n) => n.type === 'subagent');
+    if (directAttachments > 10 && !hasSubagents) {
+      errors.push(`The root ai node has ${directAttachments} direct tool/catalog attachments with no subagents — group related capabilities into 2-4 domain subagents (each owning its tools) instead of attaching everything to the root.`);
+    }
+  }
+
+  // HARD RULE (v2): no silent blank nodes. A tool node must be fully
+  // bound — the ONLY exception is an explicitly user-approved deferred
+  // capability, marked config.deferred=true (which the UI renders as
+  // "connect later", never as a mystery).
+  nodes.forEach((n, i) => {
+    if (n.type !== 'tool') return;
+    const cfg = n.config as { toolName?: string; actionType?: string; connectorId?: string; deferred?: boolean };
+    if (cfg.deferred === true) return;
+    if (!cfg.toolName || String(cfg.toolName).trim() === '') {
+      errors.push(`Node ${i} ("${n.label}"): tool node with an EMPTY toolName — bind it to a real tool, or mark it config.deferred=true ONLY if the user explicitly chose to connect it later.`);
+    }
+    if ((cfg.actionType ?? 'MCP') === 'MCP' && (!cfg.connectorId || String(cfg.connectorId).trim() === '')) {
+      errors.push(`Node ${i} ("${n.label}"): MCP tool node with no connectorId/provider — bind it to a connected provider, or mark it config.deferred=true.`);
     }
   });
 
