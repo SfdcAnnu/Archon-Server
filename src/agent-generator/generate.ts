@@ -231,10 +231,12 @@ export async function generateAgent(req: GenerateRequest, engineOverride?: Engin
 
   if (errors.length > 0) {
     logger.warn({ orgId: req.orgId, errors }, 'agent_generate_validation_failed_retrying');
-    // previous_response_id continuation — same pattern chat/adapters/
-    // openai.ts's narration-only guard already uses, rather than manually
-    // replaying the whole conversation the way Anthropic's tool_result flow
-    // needs to.
+    // previous_response_id continuation. The previous response ended in a
+    // function_call, and the Responses API REQUIRES that call to receive a
+    // function_call_output item before the conversation can continue —
+    // sending only a user message here made OpenAI reject the whole retry
+    // with "No tool output found for function call …" (found live: every
+    // validation-repair attempt 502'd instead of repairing).
     const retryResponse = await callOpenAi(
       {
         model,
@@ -243,11 +245,9 @@ export async function generateAgent(req: GenerateRequest, engineOverride?: Engin
         tool_choice: { type: 'function', name: 'create_agent' },
         previous_response_id: response.id,
         input: [{
-          role: 'user',
-          content: [{
-            type: 'input_text',
-            text: `Your output had these problems — fix them and call create_agent again with a corrected, complete graph:\n${errors.join('\n')}`,
-          }],
+          type: 'function_call_output',
+          call_id: createCall.call_id ?? createCall.id,
+          output: `Validation FAILED with these problems — fix every one and call create_agent again with a corrected, complete graph:\n${errors.join('\n')}`,
         }],
       },
       creds.apiKey,
