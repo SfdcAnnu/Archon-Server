@@ -117,8 +117,44 @@ async function fetchToolNames(baseUrl: string): Promise<Set<string> | null> {
       names = new Set((json.tools ?? []).map(t => t.name).filter(Boolean) as string[]);
     }
   } catch { /* unreachable or no /tools — leave null */ }
-  toolCatalogCache.set(baseUrl, { names, fetchedAt: Date.now() });
+  // Cache SUCCESS only. A failure here is usually a free-tier host mid-wake;
+  // caching the null for 10 minutes made every turn in that window skip
+  // validation AND told OpenAI to fetch a server we already knew was down.
+  if (names !== null) toolCatalogCache.set(baseUrl, { names, fetchedAt: Date.now() });
   return names;
+}
+
+// ── cold-start absorption ───────────────────────────────────────────
+// Free-tier MCP hosts (Render) sleep after idle. The model provider fetches
+// each MCP server's tool list ITSELF with a short timeout and no retry, so a
+// cold host surfaces as a hard turn-killing error (OpenAI: 424 Failed
+// Dependency) even though the host would be fine 30s later. Before handing a
+// URL to the provider, ping the host until it answers HTTP — any status
+// beats a connection error/edge 5xx — and remember warmth briefly so warm
+// paths cost one cache lookup.
+const mcpAwakeAt = new Map<string, number>();
+const MCP_AWAKE_TTL_MS = 5 * 60 * 1000;
+
+async function ensureMcpServerAwake(base: string): Promise<void> {
+  const last = mcpAwakeAt.get(base);
+  if (last && Date.now() - last < MCP_AWAKE_TTL_MS) return;
+  for (let attempt = 1; attempt <= 5; attempt++) {
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 8_000);
+      const res = await fetch(base, { signal: controller.signal });
+      clearTimeout(timer);
+      if (res.status < 500) {
+        mcpAwakeAt.set(base, Date.now());
+        if (attempt > 1) logger.info({ base, attempt }, 'mcp_server_woken');
+        return;
+      }
+    } catch { /* connection refused / aborted — still waking */ }
+    await new Promise(resolve => setTimeout(resolve, 3_000));
+  }
+  // Don't fail the turn from here — the provider's own fetch gets the last
+  // word; by now the host has had ~55s of wake time.
+  logger.warn({ base }, 'mcp_server_still_cold_after_wake_wait');
 }
 
 async function sanitizeAllowedTools(baseUrl: string, allowedTools: string[]): Promise<string[]> {
@@ -185,8 +221,39 @@ export async function resolveMcpServers(
   const out: ResolvedMcpServer[] = [];
 
   if (req.connectors && req.connectors.length > 0) {
-    const seen = new Set<string>();
+    // An agent may legitimately carry several catalog nodes on the SAME
+    // provider (one per owning subagent) — Apex sends each as its own
+    // connector entry. Handing the model provider N copies of one server
+    // (salesforce_mcp, salesforce_mcp_2, …) means N tool-list fetches and N
+    // chances for a cold host to kill the turn — merge them into one entry
+    // first. allowedTools: an EMPTY list means unrestricted, so if any
+    // duplicate is unrestricted the merged entry stays unrestricted;
+    // otherwise union the restriction lists.
+    const mergedByKey = new Map<string, (typeof req.connectors)[number]>();
     for (const c of req.connectors) {
+      const key = `${c.provider}::${c.mcpServerUrl.replace(/\/+$/, '')}::${c.connectorId ?? ''}`;
+      const prev = mergedByKey.get(key);
+      if (!prev) {
+        mergedByKey.set(key, {
+          ...c,
+          allowedTools: [...(c.allowedTools ?? [])],
+          customTools: c.customTools ? [...c.customTools] : c.customTools,
+        });
+        continue;
+      }
+      const prevAllowed = prev.allowedTools ?? [];
+      const currAllowed = c.allowedTools ?? [];
+      prev.allowedTools = prevAllowed.length === 0 || currAllowed.length === 0
+        ? []
+        : [...new Set([...prevAllowed, ...currAllowed])];
+      const prevCustom = prev.customTools ?? [];
+      const extraCustom = (c.customTools ?? []).filter(t =>
+        !prevCustom.some(p => p.type === t.type && p.name === t.name));
+      if (prevCustom.length + extraCustom.length > 0) prev.customTools = [...prevCustom, ...extraCustom];
+    }
+
+    const seen = new Set<string>();
+    for (const c of mergedByKey.values()) {
       const base = c.mcpServerUrl.replace(/\/+$/, '');
       let name = c.provider.replace(/[^a-zA-Z0-9_-]/g, '_');
       while (seen.has(name)) name = `${name}_2`;
@@ -206,6 +273,7 @@ export async function resolveMcpServers(
           'mcp_connector_skipped_no_token');
         continue;
       }
+      await ensureMcpServerAwake(base);
       let allowedTools = await sanitizeAllowedTools(base, c.allowedTools ?? []);
 
       // Org-specific custom tools (Apex actions / Flows) — the MCP server
@@ -234,6 +302,7 @@ export async function resolveMcpServers(
   if (config.salesforce.remoteMcpUrl) {
     const base = config.salesforce.remoteMcpUrl.replace(/\/+$/, '');
     const { allowedTools } = discoverAllowedTools(req.agent, aiNode);
+    await ensureMcpServerAwake(base);
     out.push({
       name:  'salesforce',
       url:   `${base}/mcp`,
