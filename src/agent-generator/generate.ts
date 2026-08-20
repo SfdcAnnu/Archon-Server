@@ -59,6 +59,12 @@ export interface GenerateRequest {
   resolvedCapabilities?: ResolvedCapability[];
   /** Extra grounding text (rendered pack) appended to the system prompt. */
   groundingText?: string;
+  /** Node subtypes ('claude'/'gpt4'/'gemini') the org holds ACTIVE AI engine
+   *  connections for, resolved by Apex at request time. Every generated ai/
+   *  subagent node is forced onto one of these — found live: the spec's
+   *  claude-first default produced agents whose every chat turn failed with
+   *  "no connection configured" in an OpenAI-only org. */
+  availableEngines?: string[];
 }
 
 export interface GeneratedNode {
@@ -263,6 +269,7 @@ export async function generateAgent(req: GenerateRequest, engineOverride?: Engin
   }
 
   normalizeSalesforceCatalogTools(payload.nodes);
+  normalizeEngineSubtypes(payload.nodes, req.availableEngines);
   injectDataBoundaryGuardrails(payload.nodes);
   applyAutoLayout(payload.nodes, payload.connections, mode);
   return { kind: 'agent', agent: payload };
@@ -323,6 +330,36 @@ function injectDataBoundaryGuardrails(nodes: GeneratedNode[]): void {
   }
 }
 
+/** Default model per engine subtype — used when a node has to be moved off
+ *  a provider the org can't run. */
+const ENGINE_DEFAULT_MODEL: Record<string, string> = {
+  gpt4: 'gpt-4o',
+  claude: 'claude-sonnet-4-6',
+  gemini: 'gemini-2.5-pro',
+};
+
+/** Force every ai/subagent node onto an engine the org actually holds an
+ *  active connection for. The prompt already tells the model which engines
+ *  exist (see buildUserMessage) — this is the deterministic belt to that
+ *  suspenders, same pattern as normalizeSalesforceCatalogTools above. */
+function normalizeEngineSubtypes(nodes: GeneratedNode[], availableEngines?: string[]): void {
+  const available = (availableEngines ?? []).filter((e) => ENGINE_DEFAULT_MODEL[e]);
+  if (available.length === 0) return;
+  const fallback = available[0];
+  for (const n of nodes) {
+    if (n.type !== 'ai' && n.type !== 'subagent') continue;
+    // A subagent with an empty subType inherits the root's provider at
+    // runtime — the root is normalized by this same loop, so leave it.
+    if (n.type === 'subagent' && !n.subType) continue;
+    if (available.includes(n.subType)) continue;
+    n.subType = fallback;
+    // Only rewrite an explicitly-set model; '' means inherit and stays ''.
+    if (typeof n.config.model === 'string' && n.config.model) {
+      n.config.model = ENGINE_DEFAULT_MODEL[fallback];
+    }
+  }
+}
+
 function normalizeSalesforceCatalogTools(nodes: GeneratedNode[]): void {
   for (const n of nodes) {
     if (n.type !== 'catalog' || n.subType !== 'salesforce_crm_tools') continue;
@@ -338,6 +375,12 @@ function normalizeSalesforceCatalogTools(nodes: GeneratedNode[]): void {
 
 function buildUserMessage(req: GenerateRequest): string {
   const parts = [`REQUIREMENT:\n${req.requirementText.trim()}`];
+  if (req.availableEngines && req.availableEngines.length > 0) {
+    parts.push(
+      `AI ENGINES AVAILABLE IN THIS ORG: [${req.availableEngines.join(', ')}]. ` +
+      'Every ai and subagent node MUST use one of these as its subType, with a matching model — the org holds no credentials for any other provider, so any other choice produces an agent that cannot run a single turn.'
+    );
+  }
   if (req.qaHistory && req.qaHistory.length > 0) {
     const qa = req.qaHistory.map((t, i) => `Q${i + 1}: ${t.question}\nA${i + 1}: ${t.answer}`).join('\n\n');
     parts.push(`PREVIOUSLY ASKED QUESTIONS AND THE USER'S ANSWERS:\n${qa}`);

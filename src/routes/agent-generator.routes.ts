@@ -115,6 +115,9 @@ const requestSchema = z
      *  from /api/agent/analyze, echoed back by the client. */
     resolvedCapabilities: z.array(z.record(z.string(), z.unknown())).optional(),
     grounding: z.record(z.string(), z.unknown()).optional(),
+    /** Node subtypes the org holds active AI engine connections for —
+     *  resolved Apex-side; the generator refuses to bind any other engine. */
+    availableEngines: z.array(z.string()).optional(),
     engineOverride: engineOverrideSchema,
   })
   // Text, a document, or dictated-then-transcribed voice all land in
@@ -152,6 +155,7 @@ agentGeneratorRouter.post('/api/agent/generate', sessionAuth, async (req, res) =
         groundingText: parsed.data.grounding
           ? renderGrounding(parsed.data.grounding as unknown as GroundingPack)
           : undefined,
+        availableEngines: parsed.data.availableEngines,
       },
       engineOverride,
     );
