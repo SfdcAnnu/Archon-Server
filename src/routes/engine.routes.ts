@@ -49,6 +49,89 @@ engineRouter.post('/api/engine/test', sessionAuth, async (req, res) => {
   }
 });
 
+/**
+ * Live model listing.
+ *
+ *   POST /api/engine/models
+ *   Body: { engineType, apiKey, endpoint? }
+ *   → { models: string[] }  — chat-capable model ids, newest-ish first
+ *
+ * Called by Apex AiEngineConnectionController.fetchProviderModels so the
+ * AI Models page and the add-connection dialog can offer the provider's
+ * REAL current list instead of a hardcoded one. Listing models is free on
+ * every provider (no token spend). 'custom' is treated as OpenAI-compatible.
+ */
+const modelsSchema = z.object({
+  engineType: z.enum(['claude', 'openai', 'gemini', 'custom']),
+  apiKey:     z.string().min(10),
+  endpoint:   z.string().optional().nullable(),
+});
+
+engineRouter.post('/api/engine/models', sessionAuth, async (req, res) => {
+  const parsed = modelsSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: 'invalid_body', message: 'Missing engineType or apiKey.' });
+    return;
+  }
+  const { engineType, apiKey, endpoint } = parsed.data;
+  try {
+    let models: string[];
+    if (engineType === 'claude') {
+      models = await listClaudeModels(apiKey, endpoint);
+    } else if (engineType === 'gemini') {
+      models = await listGeminiModels(apiKey, endpoint);
+    } else {
+      models = await listOpenAiModels(apiKey, endpoint); // openai + custom (OpenAI-compatible)
+    }
+    logger.info({ engineType, count: models.length }, 'engine_models_listed');
+    res.json({ models });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'Model listing failed';
+    logger.warn({ engineType, err: msg }, 'engine_models_failed');
+    res.status(400).json({ error: 'models_failed', message: msg });
+  }
+});
+
+// Non-chat OpenAI artifacts that /v1/models returns alongside chat models —
+// embeddings, audio, image, moderation — which would only clutter a picker
+// whose sole job is choosing a conversation model.
+const OPENAI_NON_CHAT = /(embedding|whisper|tts|audio|dall-e|image|moderation|realtime|transcribe|babbage|davinci|codex|search)/i;
+
+async function listOpenAiModels(apiKey: string, endpoint?: string | null): Promise<string[]> {
+  const url = (endpoint?.replace(/\/+$/, '') || 'https://api.openai.com') + '/v1/models';
+  const res = await fetch(url, { headers: { Authorization: `Bearer ${apiKey}` } });
+  if (!res.ok) throw new Error(`OpenAI model listing failed (${res.status}): ${truncate(await res.text(), 300)}`);
+  const json = (await res.json()) as { data?: Array<{ id: string }> };
+  return (json.data ?? [])
+    .map(m => m.id)
+    .filter(id => !OPENAI_NON_CHAT.test(id))
+    .sort()
+    .reverse(); // reverse-alpha floats newer families (gpt-5 > gpt-4) toward the top
+}
+
+async function listClaudeModels(apiKey: string, endpoint?: string | null): Promise<string[]> {
+  const url = (endpoint?.replace(/\/+$/, '') || 'https://api.anthropic.com') + '/v1/models?limit=100';
+  const res = await fetch(url, {
+    headers: { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
+  });
+  if (!res.ok) throw new Error(`Claude model listing failed (${res.status}): ${truncate(await res.text(), 300)}`);
+  const json = (await res.json()) as { data?: Array<{ id: string }> };
+  return (json.data ?? []).map(m => m.id); // Anthropic already returns newest first
+}
+
+async function listGeminiModels(apiKey: string, endpoint?: string | null): Promise<string[]> {
+  const base = endpoint?.replace(/\/+$/, '') || 'https://generativelanguage.googleapis.com';
+  const res = await fetch(`${base}/v1beta/models?pageSize=100&key=${encodeURIComponent(apiKey)}`);
+  if (!res.ok) throw new Error(`Gemini model listing failed (${res.status}): ${truncate(await res.text(), 300)}`);
+  const json = (await res.json()) as {
+    models?: Array<{ name: string; supportedGenerationMethods?: string[] }>;
+  };
+  return (json.models ?? [])
+    .filter(m => (m.supportedGenerationMethods ?? []).includes('generateContent'))
+    .map(m => m.name.replace(/^models\//, ''))
+    .filter(id => !/embedding|aqa|imagen/i.test(id));
+}
+
 async function probeClaude(apiKey: string, endpoint?: string | null, model?: string | null) {
   const url = (endpoint?.replace(/\/+$/, '') || 'https://api.anthropic.com') + '/v1/messages';
   const res = await fetch(url, {
