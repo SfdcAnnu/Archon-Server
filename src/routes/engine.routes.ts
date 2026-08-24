@@ -95,7 +95,7 @@ engineRouter.post('/api/engine/models', sessionAuth, async (req, res) => {
 // Non-chat OpenAI artifacts that /v1/models returns alongside chat models —
 // embeddings, audio, image, moderation — which would only clutter a picker
 // whose sole job is choosing a conversation model.
-const OPENAI_NON_CHAT = /(embedding|whisper|tts|audio|dall-e|image|moderation|realtime|transcribe|babbage|davinci|codex|search)/i;
+const OPENAI_NON_CHAT = /(embedding|whisper|tts|audio|dall-e|image|moderation|realtime|transcribe|babbage|davinci|codex|search|sora|video)/i;
 
 async function listOpenAiModels(apiKey: string, endpoint?: string | null): Promise<string[]> {
   const url = (endpoint?.replace(/\/+$/, '') || 'https://api.openai.com') + '/v1/models';
