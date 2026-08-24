@@ -27,6 +27,7 @@ import { runOpenAiAdapter } from './adapters/openai';
 import { generateSessionTitleAsync } from './title-generator';
 import { buildGraph } from '../orchestrator/graph';
 import { resolveTopLevelToolsAndSubagents, resolveSubagentActions, toSyntheticAiNode, type HandoffToolDef } from './subagent-router';
+import { loadSessionMemory, assembleMemory, maybeUpdateMemoryAsync } from './memory';
 import type { ChatTurnRequest, ChatTurnResult, ConnectorInput } from './adapters/types';
 
 export type { ChatTurnRequest, ChatTurnResult, ChatHistoryMessage } from './adapters/types';
@@ -48,8 +49,33 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
     subagentCount: handoffTools.length,
   }, 'chat_turn_dispatch');
 
+  // Memory (read path): swap already-summarized older history for the
+  // stored summary + facts preamble per the coverage invariant. Purely a
+  // read of what a PREVIOUS turn stored — adds no model call, and on any
+  // miss/failure degrades to sending the full raw history as before. The
+  // expensive summarize runs post-reply via finish() below.
+  const memory = await loadSessionMemory(req.context.orgId, req.sessionId);
+  const assembled = assembleMemory(req.history, memory);
+  const memReq: ChatTurnRequest = { ...req, history: assembled.history, memoryPreamble: assembled.preamble };
+
+  // Fire-and-forget memory upkeep — scheduled at BOTH return points so a
+  // degraded subagent turn still advances the summary. Never awaited: the
+  // caller's response goes out first.
+  const finish = (r: ChatTurnResult): ChatTurnResult => {
+    maybeUpdateMemoryAsync({
+      orgId: req.context.orgId,
+      sessionId: req.sessionId,
+      history: req.history,
+      newUserMessage: req.newUserMessage,
+      assistantText: r.assistantText,
+      engineOverride: req.engineOverride,
+      memory,
+    });
+    return r;
+  };
+
   const turnReq: ChatTurnRequest = {
-    ...req,
+    ...memReq,
     connectors: mergeActionsIntoConnectors(req.connectors, topLevelActions),
   };
 
@@ -69,8 +95,11 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
       activeSubagentName = subagentNode.name;
       const subagentAiNode = toSyntheticAiNode(subagentNode, aiNode);
       const subagentActions = resolveSubagentActions(graph, subagentNode);
+      // Built from memReq, not req — the subagent inherits the compressed
+      // history + facts preamble too, halving handoff token cost on long
+      // conversations without losing context.
       const subagentReq: ChatTurnRequest = {
-        ...req,
+        ...memReq,
         connectors: mergeActionsIntoConnectors(req.connectors, subagentActions),
       };
 
@@ -108,7 +137,7 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
         result.assistantText = "Sorry, I couldn't complete that just now — could you try again in a moment?";
         result.toolCalls = [];
         if (activeSubagentName !== null) result.activeTopicName = activeSubagentName;
-        return result; // tokensIn/tokensOut from the successful top-level call are preserved as-is
+        return finish(result); // tokensIn/tokensOut from the successful top-level call are preserved as-is
       }
       finalAiNode = subagentAiNode;
       result = {
@@ -155,7 +184,7 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<ChatTurnResult>
     });
   }
 
-  return result;
+  return finish(result);
 }
 
 async function dispatchToAdapter(

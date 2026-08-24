@@ -50,6 +50,10 @@ export interface ChatTurnRequest {
    *  this on every turn adds real Salesforce field storage, so it's opt-in
    *  per agent, not a global flag. */
   debugMode?: boolean;
+  /** Set by chat-engine.ts from session memory (memory.ts): the SESSION
+   *  FACTS + CONVERSATION SO FAR blocks. Adapters splice it into the system
+   *  prompt via buildSystemPrompt — never send it as a history message. */
+  memoryPreamble?: string | null;
   context: {
     orgId: string;
     userId: string;

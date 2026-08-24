@@ -367,6 +367,7 @@ export async function buildSystemPrompt(
   ctx:   ChatTurnRequest['context'],
   query: string,
   engineOverride?: EngineOverrideInput | null,
+  memoryPreamble?: string | null,
 ): Promise<string> {
   const config = (aiNode.config as { systemPrompt?: string }) ?? {};
   const parts: string[] = [];
@@ -387,6 +388,12 @@ export async function buildSystemPrompt(
   }
   if (config.systemPrompt && config.systemPrompt.trim().length > 0) {
     parts.push(config.systemPrompt);
+  }
+  // Session memory (facts + summary of older turns) — see chat/memory.ts.
+  // Placed right after the agent's own instructions so exact record Ids and
+  // the conversation's standing context sit top-of-mind for the model.
+  if (memoryPreamble && memoryPreamble.trim().length > 0) {
+    parts.push(memoryPreamble);
   }
   if (ctx.recordContextId) {
     parts.push(
