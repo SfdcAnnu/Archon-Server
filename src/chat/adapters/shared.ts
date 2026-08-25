@@ -390,6 +390,11 @@ export async function buildSystemPrompt(
 
   parts.push(`You are ${agent.name}, a Salesforce-embedded AI agent in chat mode.`);
 
+  // Models have no clock — without this, any "tomorrow"/"next week" they
+  // compute (Task due dates, Event start times) lands on a training-era
+  // date (live-confirmed: an Event scheduled for 2023).
+  parts.push(`Current date and time (UTC): ${new Date().toISOString()}`);
+
   // Business Rules/Knowledge (the agent's own Notes field) and uploaded/
   // indexed KB documents are different kinds of content — hand-written
   // instructions vs. searchable reference material — and are additive.
