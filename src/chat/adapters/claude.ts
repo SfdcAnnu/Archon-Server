@@ -15,7 +15,7 @@
 import { logger } from '../../logger';
 import type { AgentNode } from '../../types';
 import { InstallsRepo } from '../../db/installs.repo';
-import { buildSystemPrompt, resolveMcpServers, type ResolvedMcpServer } from './shared';
+import { buildSystemPrompt, resolveMcpServers, summarizeToolHistoryEntry, type ResolvedMcpServer } from './shared';
 import { loadAttachments, type LoadedAttachment } from './attachments';
 import { resolveEngine } from '../engine-resolver';
 import type { HandoffToolDef } from '../subagent-router';
@@ -344,7 +344,19 @@ function mapHistoryForClaude(
       out.push({ role: 'assistant', content: m.content });
       continue;
     }
-    // tool-role messages are absorbed as continuation blocks in the prior assistant turn.
+    if (m.role === 'tool') {
+      // Same fix as the OpenAI mapper: persisted tool RESULTS carry the
+      // exact record Ids/values later turns must reuse — fold each into the
+      // preceding assistant message instead of dropping it.
+      const summary = summarizeToolHistoryEntry(m);
+      if (!summary) continue;
+      const prev = out[out.length - 1];
+      if (prev && prev.role === 'assistant' && typeof prev.content === 'string') {
+        prev.content = `${prev.content}\n\n${summary}`;
+      } else {
+        out.push({ role: 'assistant', content: summary });
+      }
+    }
   }
 
   // Build the new user message. If there are attachments, use content blocks;

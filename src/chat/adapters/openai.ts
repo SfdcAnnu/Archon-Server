@@ -12,7 +12,7 @@
 import { logger } from '../../logger';
 import type { AgentNode } from '../../types';
 import { InstallsRepo } from '../../db/installs.repo';
-import { buildSystemPrompt, resolveMcpServers } from './shared';
+import { buildSystemPrompt, resolveMcpServers, summarizeToolHistoryEntry } from './shared';
 import { loadAttachments, type LoadedAttachment } from './attachments';
 import { resolveEngine } from '../engine-resolver';
 import type { HandoffToolDef } from '../subagent-router';
@@ -324,7 +324,23 @@ function mapHistoryForOpenAi(
   const out: Array<{ role: string; content: Array<Record<string, unknown>> }> = [];
   out.push({ role: 'system', content: [{ type: 'input_text', text: systemPrompt }] });
   for (const m of history) {
-    if (m.role === 'system' || m.role === 'tool') continue;
+    if (m.role === 'system') continue;
+    // Tool rows carry the ACTUAL data past turns retrieved — record Ids,
+    // amounts, line items. Dropping them (the old behavior) meant the model
+    // re-derived or INVENTED those values on later turns (live-confirmed:
+    // a hallucinated '006g...abcdEF' Opportunity Id on the WhatsApp path).
+    // Fold each into the preceding assistant message as pinned context.
+    if (m.role === 'tool') {
+      const summary = summarizeToolHistoryEntry(m);
+      if (!summary) continue;
+      const prev = out[out.length - 1];
+      if (prev && prev.role === 'assistant' && prev.content[0]?.type === 'output_text') {
+        prev.content[0].text = `${prev.content[0].text as string}\n\n${summary}`;
+      } else {
+        out.push({ role: 'assistant', content: [{ type: 'output_text', text: summary }] });
+      }
+      continue;
+    }
     out.push({
       role: m.role,
       content: [{ type: m.role === 'assistant' ? 'output_text' : 'input_text', text: m.content }],

@@ -361,6 +361,22 @@ async function buildKbBlock(
   }
 }
 
+/** Compact, model-facing summary of a persisted tool-result history row —
+ *  folded into the adjacent assistant message by both adapters' history
+ *  mappers so exact record Ids/values survive into later turns (the same
+ *  cure ChatPanel applies client-side on the WS path). */
+export function summarizeToolHistoryEntry(m: { content: string; toolCallsJson?: string | null; toolResultsJson?: string | null }): string | null {
+  let name = 'tool';
+  try {
+    const j = JSON.parse(m.toolCallsJson ?? '{}') as { name?: string };
+    if (j.name) name = j.name;
+  } catch { /* keep default */ }
+  const output = (m.content ?? '').trim() || (m.toolResultsJson ?? '').trim();
+  if (!output) return null;
+  const clipped = output.length > 600 ? output.slice(0, 600) + '…' : output;
+  return `[Earlier tool result — ${name}: ${clipped}\nReuse exact Ids/values from here in later turns; never invent or truncate them.]`;
+}
+
 export async function buildSystemPrompt(
   agent: AgentDefinition,
   aiNode: AgentNode,
